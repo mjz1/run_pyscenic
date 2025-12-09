@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
-import shutil
 
 import click
 import pandas as pd
@@ -12,10 +12,10 @@ import scanpy as sc
 
 def _atomic_move(src_path, dst_path):
     """Atomically move a file from src to dst using temporary file + rename.
-    
+
     This ensures that the destination file is only updated when the source
     is complete, preventing partial/empty files from being treated as valid.
-    
+
     Args:
         src_path: Source file path
         dst_path: Destination file path
@@ -36,9 +36,11 @@ def _real(path):
     return os.path.realpath(path) if path else path
 
 
-def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, ranking_files):
+def write_expression_tsv(
+    anndata_path, results_dir, max_cells, overwrite, ranking_files
+):
     """Load AnnData, filter to genes in ranking databases, export cells x genes TSV; return path. Skip if present unless overwrite.
-    
+
     Args:
         anndata_path: Path to input .h5ad file
         results_dir: Directory to write output files
@@ -60,12 +62,13 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
 
     # Check if the main matrix contains integer counts
     import numpy as np
-    test_data = adata.X[:min(100, adata.n_obs), :min(100, adata.n_vars)]
+
+    test_data = adata.X[: min(100, adata.n_obs), : min(100, adata.n_vars)]
     if hasattr(test_data, "toarray"):
         test_data = test_data.toarray()
-    
+
     is_integer = np.allclose(test_data, np.round(test_data))
-    
+
     if not is_integer:
         logging.warning(
             "Main matrix (adata.X) does not appear to contain integer counts. "
@@ -73,13 +76,19 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
         )
         # Check if counts layer exists
         if "counts" in adata.layers:
-            logging.info("Found 'counts' layer in adata.layers - checking if it contains integers")
-            test_counts = adata.layers["counts"][:min(100, adata.n_obs), :min(100, adata.n_vars)]
+            logging.info(
+                "Found 'counts' layer in adata.layers - checking if it contains integers"
+            )
+            test_counts = adata.layers["counts"][
+                : min(100, adata.n_obs), : min(100, adata.n_vars)
+            ]
             if hasattr(test_counts, "toarray"):
                 test_counts = test_counts.toarray()
-            
+
             if np.allclose(test_counts, np.round(test_counts)):
-                logging.info("Using integer counts from adata.layers['counts'] instead of adata.X")
+                logging.info(
+                    "Using integer counts from adata.layers['counts'] instead of adata.X"
+                )
                 adata.X = adata.layers["counts"]
             else:
                 logging.warning(
@@ -100,16 +109,20 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
         # Get all column names except the last one (which is typically a ranking/metadata column)
         db_genes = set(df.columns[:-1])
         db_genes_list.append(db_genes)
-        logging.info("Database %s has %d genes", os.path.basename(ranking_file), len(db_genes))
-    
+        logging.info(
+            "Database %s has %d genes", os.path.basename(ranking_file), len(db_genes)
+        )
+
     # Find intersection of all database genes
     if db_genes_list:
         common_genes = set.intersection(*db_genes_list)
         logging.info("Common genes across all databases: %d", len(common_genes))
-        
+
         # Subset AnnData to genes present in all databases
         adata = adata[:, adata.var_names.isin(common_genes)]
-        logging.info("Filtered AnnData to genes in all databases: %d genes", adata.n_vars)
+        logging.info(
+            "Filtered AnnData to genes in all databases: %d genes", adata.n_vars
+        )
 
     # Slice to max_cells before removing non-expressed genes
     cell_slice = slice(None) if max_cells is None else slice(0, max_cells)
@@ -122,11 +135,13 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
         expr_array = expr.toarray()
     else:
         expr_array = expr
-    
+
     zero_genes = expr_array.sum(axis=0) == 0
     initial_n_vars = adata.n_vars
     adata = adata[:, ~zero_genes]
-    logging.info("Removed non-expressed genes: %d -> %d genes", initial_n_vars, adata.n_vars)
+    logging.info(
+        "Removed non-expressed genes: %d -> %d genes", initial_n_vars, adata.n_vars
+    )
 
     expr = adata.X
     expr_dense = expr.toarray() if hasattr(expr, "toarray") else expr
@@ -135,13 +150,13 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
     df_cells_x_genes = pd.DataFrame(
         expr_dense, index=obs_names, columns=adata.var_names
     )
-    
+
     # Write to temporary file first, then atomically move to final location
     with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.tsv', dir=results_dir, delete=False
+        mode="w", suffix=".tsv", dir=results_dir, delete=False
     ) as tmp_file:
         tmp_path = tmp_file.name
-    
+
     try:
         df_cells_x_genes.to_csv(tmp_path, sep="\t", index=True)
         _atomic_move(tmp_path, expr_path)
@@ -151,8 +166,9 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise e
-    
+
     return expr_path
+
 
 def run_grnboost2(
     results_dir,
@@ -175,10 +191,10 @@ def run_grnboost2(
 
     # Use temporary file for output to avoid empty files being treated as valid
     with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.tsv', dir=results_dir, delete=False
+        mode="w", suffix=".tsv", dir=results_dir, delete=False
     ) as tmp_file:
         tmp_adjacency_path = tmp_file.name
-    
+
     try:
         cmd = [
             "pyscenic",
@@ -214,6 +230,7 @@ def run_grnboost2(
             os.remove(tmp_adjacency_path)
         raise e
 
+
 def run_regdiff(
     results_dir,
     expression_path,
@@ -224,7 +241,7 @@ def run_regdiff(
     resource_dir=None,
 ):
     """Run RegDiffusion GRN inference; skip if output exists unless overwrite.
-    
+
     Args:
         results_dir: Directory to save output adjacency file.
         expression_path: Path to expression matrix TSV (cells x genes).
@@ -233,18 +250,19 @@ def run_regdiff(
         overwrite: If True, regenerate adjacency even if it exists.
         tf_file: Path to TF list file (optional, defaults to resource_dir/allTFs_hg38.txt).
         resource_dir: Directory with pySCENIC resource files.
-    
+
     Returns:
         Path to the generated adjacency.tsv file.
     """
     import numpy as np
+
     try:
         import regdiffusion as rd
     except ImportError:
         raise ImportError(
             "RegDiffusion is not installed. Install it with: pip install regdiffusion"
         )
-    
+
     adjacency_path = os.path.join(results_dir, "adjacency.tsv")
     if os.path.exists(adjacency_path) and not overwrite:
         logging.info(
@@ -252,41 +270,50 @@ def run_regdiff(
             adjacency_path,
         )
         return adjacency_path
-    
+
     tf_resolved = tf_file or os.path.join(resource_dir, "allTFs_hg38.txt")
-    tf_df = pd.read_csv(tf_resolved, header=None, names=['TF'])
+    tf_df = pd.read_csv(tf_resolved, header=None, names=["TF"])
 
     logging.info("[RegDiff] Loading expression matrix from %s", expression_path)
     expr_df = pd.read_csv(expression_path, sep="\t", index_col=0)
-    
+
     # Convert to numpy array and apply log transformation
     x = expr_df.values
     x = np.log(x + 1.0)
-    
-    logging.info("[RegDiff] Training RegDiffusion model on %d cells x %d genes", x.shape[0], x.shape[1])
+
+    logging.info(
+        "[RegDiff] Training RegDiffusion model on %d cells x %d genes",
+        x.shape[0],
+        x.shape[1],
+    )
     rd_trainer = rd.RegDiffusionTrainer(x)
     rd_trainer.train()
-    
-    logging.info("[RegDiff] Extracting GRN with top %d percentile edges", top_gene_percentile)
-    grn = rd_trainer.get_grn(gene_names=expr_df.columns.tolist(), 
-                             top_gene_percentile=top_gene_percentile)
+
+    logging.info(
+        "[RegDiff] Extracting GRN with top %d percentile edges", top_gene_percentile
+    )
+    grn = rd_trainer.get_grn(
+        gene_names=expr_df.columns.tolist(), top_gene_percentile=top_gene_percentile
+    )
 
     # Extract all edges for each gene
     logging.info("[RegDiff] Extracting edgelist with %d workers", n_cores)
     adjacencies = grn.extract_edgelist(k=-1, workers=n_cores)
-    adjacencies.columns = ['TF', 'target', 'importance']
-    
+    adjacencies.columns = ["TF", "target", "importance"]
+
     # Restrict to TFs and sort by importance
-    adjacencies = adjacencies[adjacencies['TF'].isin(tf_df['TF'])].sort_values(by='importance', ascending=False)
-    
+    adjacencies = adjacencies[adjacencies["TF"].isin(tf_df["TF"])].sort_values(
+        by="importance", ascending=False
+    )
+
     # Write to temporary file first, then atomically move to final location
     with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.tsv', dir=results_dir, delete=False
+        mode="w", suffix=".tsv", dir=results_dir, delete=False
     ) as tmp_file:
         tmp_path = tmp_file.name
-    
+
     try:
-        adjacencies.to_csv(tmp_path, sep='\t', index=False)
+        adjacencies.to_csv(tmp_path, sep="\t", index=False)
         _atomic_move(tmp_path, adjacency_path)
         logging.info("[RegDiff] Completed; adjacency at %s", adjacency_path)
         return adjacency_path
@@ -295,6 +322,7 @@ def run_regdiff(
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise e
+
 
 def run_ctx(
     results_dir,
@@ -321,10 +349,10 @@ def run_ctx(
 
     # Use temporary file for output to avoid empty files being treated as valid
     with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.csv', dir=results_dir, delete=False
+        mode="w", suffix=".csv", dir=results_dir, delete=False
     ) as tmp_file:
         tmp_regulons_path = tmp_file.name
-    
+
     try:
         cmd = [
             "pyscenic",
@@ -366,6 +394,7 @@ def run_ctx(
             os.remove(tmp_regulons_path)
         raise e
 
+
 def run_aucell(
     results_dir,
     expression_path,
@@ -374,14 +403,14 @@ def run_aucell(
     overwrite,
 ):
     """Run pySCENIC aucell (AUCell activity scoring); skip if output exists unless overwrite.
-    
+
     Args:
         results_dir: Directory to save output AUC matrix file.
         expression_path: Path to expression matrix TSV (cells x genes).
         regulons_path: Path to regulons CSV (from ctx step).
         n_cores: Number of workers for AUCell computation.
         overwrite: If True, regenerate AUC matrix even if it exists.
-    
+
     Returns:
         Path to the generated AUC matrix CSV file.
     """
@@ -395,10 +424,10 @@ def run_aucell(
 
     # Use temporary file for output to avoid empty files being treated as valid
     with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.csv', dir=results_dir, delete=False
+        mode="w", suffix=".csv", dir=results_dir, delete=False
     ) as tmp_file:
         tmp_auc_mtx_path = tmp_file.name
-    
+
     try:
         cmd = [
             "pyscenic",
@@ -638,7 +667,7 @@ def main(
         expression_path = write_expression_tsv(
             anndata_path, results_dir, max_cells, overwrite, ranking_files_for_filter
         )
-        
+
         if grn_method.lower() == "grnboost2":
             logging.info("[STEP] Running GRNBoost2")
             adjacency_path = run_grnboost2(
