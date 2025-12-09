@@ -366,6 +366,70 @@ def run_ctx(
             os.remove(tmp_regulons_path)
         raise e
 
+def run_aucell(
+    results_dir,
+    expression_path,
+    regulons_path,
+    n_cores,
+    overwrite,
+):
+    """Run pySCENIC aucell (AUCell activity scoring); skip if output exists unless overwrite.
+    
+    Args:
+        results_dir: Directory to save output AUC matrix file.
+        expression_path: Path to expression matrix TSV (cells x genes).
+        regulons_path: Path to regulons CSV (from ctx step).
+        n_cores: Number of workers for AUCell computation.
+        overwrite: If True, regenerate AUC matrix even if it exists.
+    
+    Returns:
+        Path to the generated AUC matrix CSV file.
+    """
+    auc_mtx_path = os.path.join(results_dir, "auc_mtx.csv")
+    if os.path.exists(auc_mtx_path) and not overwrite:
+        logging.info(
+            "Found existing AUC matrix at %s; skipping aucell (use --overwrite to rerun)",
+            auc_mtx_path,
+        )
+        return auc_mtx_path
+
+    # Use temporary file for output to avoid empty files being treated as valid
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.csv', dir=results_dir, delete=False
+    ) as tmp_file:
+        tmp_auc_mtx_path = tmp_file.name
+    
+    try:
+        cmd = [
+            "pyscenic",
+            "aucell",
+            expression_path,
+            regulons_path,
+            "-o",
+            tmp_auc_mtx_path,
+            "--num_workers",
+            str(n_cores),
+        ]
+
+        logging.info("[AUCell] Command: %s", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error("pySCENIC aucell failed. STDOUT: %s", result.stdout)
+            logging.error("pySCENIC aucell failed. STDERR: %s", result.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+
+        # Atomically move temporary file to final location
+        _atomic_move(tmp_auc_mtx_path, auc_mtx_path)
+        logging.info("[AUCell] Completed; AUC matrix at %s", auc_mtx_path)
+        return auc_mtx_path
+    except Exception as e:
+        # Clean up temporary file on error
+        if os.path.exists(tmp_auc_mtx_path):
+            os.remove(tmp_auc_mtx_path)
+        raise e
+
 
 @click.command()
 @click.option(
@@ -465,6 +529,11 @@ def run_ctx(
     type=int,
     help="RegDiffusion: percentile threshold for GRN edge weights (only used with --grn-method=regdiff)",
 )
+@click.option(
+    "--skip-aucell",
+    is_flag=True,
+    help="Skip aucell (AUCell activity scoring) step",
+)
 def main(
     anndata_path,
     results_dir,
@@ -481,6 +550,7 @@ def main(
     skip_grn,
     grn_method,
     regdiff_percentile,
+    skip_aucell,
 ):
     """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx) from an AnnData input."""
 
@@ -638,7 +708,7 @@ def main(
             raise ValueError(
                 f"For ctx step, --n-cores ({n_cores}) must be >= number of ranking files ({num_ranking_files})"
             )
-        run_ctx(
+        regulons_path = run_ctx(
             results_dir,
             resource_dir,
             adjacency_path,
@@ -648,6 +718,26 @@ def main(
             n_cores,
             overwrite,
         )
+    else:
+        regulons_path = os.path.join(results_dir, "regulons.csv")
+
+    if not skip_aucell:
+        logging.info("[STEP] aucell (AUCell activity scoring)")
+        if not os.path.exists(regulons_path):
+            raise FileNotFoundError(
+                f"aucell requires regulons file at {regulons_path}. "
+                "Either run without --skip-ctx or provide existing regulons."
+            )
+        run_aucell(
+            results_dir,
+            expression_path,
+            regulons_path,
+            n_cores,
+            overwrite,
+        )
+        logging.info("[STEP] aucell complete")
+    else:
+        logging.info("[STEP] Skipping aucell step (--skip-aucell enabled)")
 
 
 if __name__ == "__main__":
