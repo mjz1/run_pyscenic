@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy project metadata and install deps with uv into system site-packages
 WORKDIR /app
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 RUN uv pip install --system --no-cache .
 
 # Resources - download all in single RUN command
