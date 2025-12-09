@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import logging
 import os
 import subprocess
@@ -17,24 +18,58 @@ def _real(path):
     return os.path.realpath(path) if path else path
 
 
-def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, ranking_files, resource_dir):
+def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, ranking_files):
     """Load AnnData, filter to genes in ranking databases, export cells x genes TSV; return path. Skip if present unless overwrite.
     
     Args:
         ranking_files: Tuple of ranking database files to filter genes against.
         resource_dir: Path to resource directory (for default ranking files if none provided).
     """
-    expr_t_path = os.path.join(results_dir, "expression_t.tsv")
-    if os.path.exists(expr_t_path) and not overwrite:
+    expr_path = os.path.join(results_dir, "expression.tsv")
+    if os.path.exists(expr_path) and not overwrite:
         logging.info(
             "Found existing expression matrix at %s; skipping export (use --overwrite to regenerate)",
-            expr_t_path,
+            expr_path,
         )
-        return expr_t_path
+        return expr_path
 
     logging.info("Reading AnnData from %s", anndata_path)
     adata = sc.read_h5ad(anndata_path)
     logging.info("Initial gene count: %d", adata.n_vars)
+
+    # Check if the main matrix contains integer counts
+    import numpy as np
+    test_data = adata.X[:min(100, adata.n_obs), :min(100, adata.n_vars)]
+    if hasattr(test_data, "toarray"):
+        test_data = test_data.toarray()
+    
+    is_integer = np.allclose(test_data, np.round(test_data))
+    
+    if not is_integer:
+        logging.warning(
+            "Main matrix (adata.X) does not appear to contain integer counts. "
+            "This may be normalized data, which is not suitable for GRN inference."
+        )
+        # Check if counts layer exists
+        if "counts" in adata.layers:
+            logging.info("Found 'counts' layer in adata.layers - checking if it contains integers")
+            test_counts = adata.layers["counts"][:min(100, adata.n_obs), :min(100, adata.n_vars)]
+            if hasattr(test_counts, "toarray"):
+                test_counts = test_counts.toarray()
+            
+            if np.allclose(test_counts, np.round(test_counts)):
+                logging.info("Using integer counts from adata.layers['counts'] instead of adata.X")
+                adata.X = adata.layers["counts"]
+            else:
+                logging.warning(
+                    "adata.layers['counts'] also does not contain integers. "
+                    "Proceeding with adata.X but results may be suboptimal."
+                )
+        else:
+            logging.warning(
+                "No 'counts' layer found in AnnData. "
+                "Proceeding with adata.X but results may be suboptimal if data is normalized."
+            )
 
     # Load ranking databases and filter to genes present in all of them
     logging.info("Loading ranking databases to identify common genes")
@@ -55,31 +90,45 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
         adata = adata[:, adata.var_names.isin(common_genes)]
         logging.info("Filtered AnnData to genes in all databases: %d genes", adata.n_vars)
 
+    # Slice to max_cells before removing non-expressed genes
     cell_slice = slice(None) if max_cells is None else slice(0, max_cells)
-    expr = adata.X[cell_slice, :]
+    adata = adata[cell_slice, :]
+    logging.info("Sliced to %d cells", adata.n_obs)
+
+    # Remove non-expressed genes (genes with zero counts across the sliced cells)
+    expr = adata.X
+    if hasattr(expr, "toarray"):
+        expr_array = expr.toarray()
+    else:
+        expr_array = expr
+    
+    zero_genes = expr_array.sum(axis=0) == 0
+    initial_n_vars = adata.n_vars
+    adata = adata[:, ~zero_genes]
+    logging.info("Removed non-expressed genes: %d -> %d genes", initial_n_vars, adata.n_vars)
+
+    expr = adata.X
     expr_dense = expr.toarray() if hasattr(expr, "toarray") else expr
 
-    obs_names = adata.obs_names[cell_slice]
+    obs_names = adata.obs_names
     df_cells_x_genes = pd.DataFrame(
         expr_dense, index=obs_names, columns=adata.var_names
     )
-    df_cells_x_genes.to_csv(expr_t_path, sep="\t", index=True)
+    df_cells_x_genes.to_csv(expr_path, sep="\t", index=True)
 
-    logging.info("Wrote expression matrix to %s", expr_t_path)
-    return expr_t_path
-
+    logging.info("Wrote expression matrix to %s", expr_path)
+    return expr_path
 
 def run_grnboost2(
-    sif_img,
     results_dir,
     resource_dir,
     tf_file,
-    expression_t_path,
+    expression_path,
     n_cores,
     seed,
     overwrite,
 ):
-    """Run pySCENIC GRNBoost2 inside Singularity; skip if output exists unless overwrite."""
+    """Run pySCENIC GRNBoost2; skip if output exists unless overwrite."""
     tf_resolved = tf_file or os.path.join(resource_dir, "allTFs_hg38.txt")
     adjacency_path = os.path.join(results_dir, "adjacency.tsv")
     if os.path.exists(adjacency_path) and not overwrite:
@@ -90,13 +139,6 @@ def run_grnboost2(
         return adjacency_path
 
     cmd = [
-        "singularity",
-        "run",
-        "-B",
-        f"{results_dir}:{results_dir}",
-        "-B",
-        f"{resource_dir}:{resource_dir}",
-        sif_img,
         "pyscenic",
         "grn",
         "--num_workers",
@@ -107,7 +149,7 @@ def run_grnboost2(
         "grnboost2",
         "--output",
         adjacency_path,
-        expression_t_path,
+        expression_path,
         tf_resolved,
     ]
 
@@ -123,22 +165,82 @@ def run_grnboost2(
     logging.info("[GRN] Completed; adjacency at %s", adjacency_path)
     return adjacency_path
 
-def run_regdiff():
-    """Placeholder for future regdiff implementation."""
-    pass
+def run_regdiff(
+    results_dir,
+    expression_path,
+    n_cores,
+    top_gene_percentile,
+    overwrite,
+):
+    """Run RegDiffusion GRN inference; skip if output exists unless overwrite.
+    
+    Args:
+        results_dir: Directory to save output adjacency file.
+        expression_path: Path to expression matrix TSV (cells x genes).
+        n_cores: Number of cores/workers for edge extraction.
+        top_gene_percentile: Percentile threshold for GRN edge weights (e.g., 50 for top 50%).
+        overwrite: If True, regenerate adjacency even if it exists.
+    
+    Returns:
+        Path to the generated adjacency.tsv file.
+    """
+    import numpy as np
+    try:
+        import regdiffusion as rd
+    except ImportError:
+        raise ImportError(
+            "RegDiffusion is not installed. Install it with: pip install regdiffusion"
+        )
+    
+    adjacency_path = os.path.join(results_dir, "adjacency.tsv")
+    if os.path.exists(adjacency_path) and not overwrite:
+        logging.info(
+            "Found existing adjacency at %s; skipping regdiff (use --overwrite to rerun)",
+            adjacency_path,
+        )
+        return adjacency_path
+    
+    tf_resolved = tf_file or os.path.join(resource_dir, "allTFs_hg38.txt")
+    tf_df = pd.read_csv(tf_resolved, header=None, names=['TF'])
+
+    logging.info("[RegDiff] Loading expression matrix from %s", expression_path)
+    expr_df = pd.read_csv(expression_path, sep="\t", index_col=0)
+    
+    # Convert to numpy array and apply log transformation
+    x = expr_df.values
+    x = np.log(x + 1.0)
+    
+    logging.info("[RegDiff] Training RegDiffusion model on %d cells x %d genes", x.shape[0], x.shape[1])
+    rd_trainer = rd.RegDiffusionTrainer(x)
+    rd_trainer.train()
+    
+    logging.info("[RegDiff] Extracting GRN with top %d percentile edges", top_gene_percentile)
+    grn = rd_trainer.get_grn(gene_names=expr_df.columns.tolist(), 
+                             top_gene_percentile=top_gene_percentile)
+
+    # Extract all edges for each gene
+    logging.info("[RegDiff] Extracting edgelist with %d workers", n_cores)
+    adjacencies = grn.extract_edgelist(k=-1, workers=n_cores)
+    adjacencies.columns = ['TF', 'target', 'importance']
+    
+    # Restrict to TFs and sort by importance
+    adjacencies = adjacencies[adjacencies['TF'].isin(tf_df['TF'])].sort_values(by='importance', ascending=False)
+    
+    adjacencies.to_csv(adjacency_path, sep='\t', index=False)
+    logging.info("[RegDiff] Completed; adjacency at %s", adjacency_path)
+    return adjacency_path
 
 def run_ctx(
-    sif_img,
     results_dir,
     resource_dir,
     adjacency_path,
-    expression_t_path,
+    expression_path,
     motif_f,
     ranking_files,
     n_cores,
     overwrite,
 ):
-    """Run pySCENIC ctx (motif enrichment) inside Singularity; skip if output exists unless overwrite.
+    """Run pySCENIC ctx (motif enrichment); skip if output exists unless overwrite.
 
     Args:
         ranking_files: Iterable of ranking database files (at least one required).
@@ -152,13 +254,6 @@ def run_ctx(
         return regulons_path
 
     cmd = [
-        "singularity",
-        "run",
-        "-B",
-        f"{results_dir}:{results_dir}",
-        "-B",
-        f"{resource_dir}:{resource_dir}",
-        sif_img,
         "pyscenic",
         "ctx",
         adjacency_path,
@@ -169,7 +264,7 @@ def run_ctx(
             "--annotations_fname",
             motif_f,
             "--expression_mtx_fname",
-            expression_t_path,
+            expression_path,
             "--mode",
             "custom_multiprocessing",
             "--output",
@@ -200,13 +295,6 @@ def run_ctx(
     help="Path to input .h5ad file",
 )
 @click.option(
-    "--sif-img",
-    default="/data1/shahs3/users/zatzmanm/work/images/pyscenic/aertslab-pyscenic-0.12.1.sif",
-    show_default=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to pySCENIC Singularity image",
-)
-@click.option(
     "--results-dir",
     default="./pyscenic_results",
     show_default=True,
@@ -215,16 +303,16 @@ def run_ctx(
 )
 @click.option(
     "--resource-dir",
-    default="/data1/shahs3/users/zatzmanm/work/images/pyscenic/pyscenic_resources",
+    default="/opt/pyscenic_resources",
     show_default=True,
-    type=click.Path(file_okay=False, exists=True),
-    help="Directory with pySCENIC resource files",
+    type=click.Path(file_okay=False),
+    help="Directory with pySCENIC resource files (TF lists, ranking databases, motif annotations)",
 )
 @click.option(
     "--tf-file",
-    required=True,
-    type=click.Path(dir_okay=False, exists=True),
-    help="Path to TF list file",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Path to TF list file (defaults to resource_dir/allTFs_hg38.txt)",
 )
 @click.option(
     "--n-cores",
@@ -283,9 +371,22 @@ def run_ctx(
     is_flag=True,
     help="Skip GRN (GRNBoost2) step; requires existing adjacency.tsv",
 )
+@click.option(
+    "--grn-method",
+    default="grnboost2",
+    show_default=True,
+    type=click.Choice(["grnboost2", "regdiff"], case_sensitive=False),
+    help="GRN inference method: grnboost2 (via Singularity) or regdiff (RegDiffusion)",
+)
+@click.option(
+    "--regdiff-percentile",
+    default=50,
+    show_default=True,
+    type=int,
+    help="RegDiffusion: percentile threshold for GRN edge weights (only used with --grn-method=regdiff)",
+)
 def main(
     anndata_path,
-    sif_img,
     results_dir,
     resource_dir,
     tf_file,
@@ -298,17 +399,18 @@ def main(
     ranking_files,
     skip_ctx,
     skip_grn,
+    grn_method,
+    regdiff_percentile,
 ):
-    """Run pySCENIC GRNBoost2 from an AnnData input."""
+    """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx) from an AnnData input."""
 
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Resolve real (non-symlink) absolute paths for Singularity binds
+    # Resolve real (non-symlink) absolute paths
     anndata_path = _real(anndata_path)
-    sif_img = _real(sif_img)
     results_dir = _real(results_dir)
     resource_dir = _real(resource_dir)
     tf_file = _real(tf_file) if tf_file else tf_file
@@ -321,7 +423,6 @@ def main(
     logging.info("Results directory: %s", results_dir)
     logging.info("[SETUP] anndata=%s", anndata_path)
     logging.info("[SETUP] results_dir=%s", results_dir)
-    logging.info("[SETUP] sif_img=%s", sif_img)
     logging.info("[SETUP] resource_dir=%s", resource_dir)
     logging.info(
         "[SETUP] cores=%s seed=%s max_cells=%s overwrite=%s",
@@ -334,7 +435,6 @@ def main(
     # Validate required files before running
     base_checks = [
         anndata_path,
-        sif_img,
         tf_file or os.path.join(resource_dir, "allTFs_hg38.txt"),
     ]
 
@@ -385,35 +485,48 @@ def main(
                     )
                 ),
             )
-        expression_t_path = write_expression_tsv(
+        expression_path = write_expression_tsv(
             anndata_path, results_dir, max_cells, overwrite, ranking_files_for_filter, resource_dir
         )
-        logging.info("[STEP] Running GRNBoost2")
-        adjacency_path = run_grnboost2(
-            sif_img,
-            results_dir,
-            resource_dir,
-            tf_file,
-            expression_t_path,
-            n_cores,
-            seed,
-            overwrite,
-        )
-        logging.info("[STEP] GRNBoost2 complete")
+        
+        if grn_method.lower() == "grnboost2":
+            logging.info("[STEP] Running GRNBoost2")
+            adjacency_path = run_grnboost2(
+                results_dir,
+                resource_dir,
+                tf_file,
+                expression_path,
+                n_cores,
+                seed,
+                overwrite,
+            )
+            logging.info("[STEP] GRNBoost2 complete")
+        elif grn_method.lower() == "regdiff":
+            logging.info("[STEP] Running RegDiffusion")
+            adjacency_path = run_regdiff(
+                results_dir,
+                expression_path,
+                n_cores,
+                regdiff_percentile,
+                overwrite,
+            )
+            logging.info("[STEP] RegDiffusion complete")
+        else:
+            raise ValueError(f"Unknown GRN method: {grn_method}")
     else:
         logging.info("[STEP] Skipping GRN step (--skip-grn enabled)")
         adjacency_path = os.path.join(results_dir, "adjacency.tsv")
-        expression_t_path = os.path.join(results_dir, "expression_t.tsv")
+        expression_path = os.path.join(results_dir, "expression_t.tsv")
         if not os.path.exists(adjacency_path):
             raise FileNotFoundError(
                 f"--skip-grn requires existing adjacency file at {adjacency_path}"
             )
-        if not os.path.exists(expression_t_path):
+        if not os.path.exists(expression_path):
             raise FileNotFoundError(
-                f"--skip-grn requires existing expression matrix at {expression_t_path}"
+                f"--skip-grn requires existing expression matrix at {expression_path}"
             )
         logging.info("Found existing adjacency: %s", adjacency_path)
-        logging.info("Found existing expression: %s", expression_t_path)
+        logging.info("Found existing expression: %s", expression_path)
 
     if not skip_ctx:
         logging.info("[STEP] ctx (motif enrichment)")
@@ -427,13 +540,13 @@ def main(
                 _real(
                     os.path.join(
                         resource_dir,
-                        "hg38-tss-centered-5kb-10species.mc9nr.genes_vs_motifs.rankings.feather",
+                        "hg38_500bp_up_100bp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather",
                     )
                 ),
                 _real(
                     os.path.join(
                         resource_dir,
-                        "hg38-tss-centered-10kb-10species.mc9nr.genes_vs_motifs.rankings.feather",
+                        "hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather",
                     )
                 ),
             )
@@ -444,11 +557,10 @@ def main(
                 f"For ctx step, --n-cores ({n_cores}) must be >= number of ranking files ({num_ranking_files})"
             )
         run_ctx(
-            sif_img,
             results_dir,
             resource_dir,
             adjacency_path,
-            expression_t_path,
+            expression_path,
             motif_resolved,
             ranking_files_resolved,
             n_cores,
