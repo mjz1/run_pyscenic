@@ -1,38 +1,46 @@
-# Start from docker image from Aerts' lab
-FROM aertslab/pyscenic:0.12.1
+# Base image: minimal Python 3.10
+FROM python:3.10-slim
 
-# Update and install wget
-RUN apt update && apt upgrade -y && apt install -y wget
+ENV DEBIAN_FRONTEND=noninteractive \
+	PYTHONDONTWRITEBYTECODE=1 \
+	PYTHONUNBUFFERED=1
 
-# Upgrade pip and install anndata (h5ad loading), ipykernel (jupyter), regdiffusion (to replace grnboost2)
-RUN python -m pip install --upgrade pip \
-    && pip install regdiffusion
+# System deps for scientific Python and building wheels, plus uv installation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	build-essential \
+	curl \
+	wget \
+	git \
+	ca-certificates \
+	libhdf5-dev \
+	libxml2-dev \
+	libxslt1-dev \
+	libz-dev \
+	liblzma-dev \
+	libbz2-dev \
+	libssl-dev \
+	libffi-dev \
+	liblapack-dev \
+	libblas-dev \
+	gfortran \
+	pkg-config \
+	&& pip install --no-cache-dir uv \
+	&& rm -rf /var/lib/apt/lists/*
 
-# Copy the run_pyscenic.py script and make it executable
-COPY run_pyscenic.py /usr/local/bin/run_pyscenic.py
-RUN chmod +x /usr/local/bin/run_pyscenic.py
+# Copy project metadata and install deps with uv into system site-packages
+WORKDIR /app
+COPY pyproject.toml ./
+RUN uv pip install --system --no-cache .
 
-# Add /usr/local/bin to PATH (should already be there, but make explicit)
-ENV PATH="/usr/local/bin:${PATH}"
+# Resources - download all in single RUN command
+RUN mkdir -p /opt/pyscenic_resources && \
+	cd /opt/pyscenic_resources && \
+	wget -q "https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/hg38_500bp_up_100bp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather" && \
+	wget -q "https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather" && \
+	wget -q "https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl" && \
+	wget -q "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt"
 
-# Create resources directory
-RUN mkdir -p /opt/pyscenic_resources
-
-# Download pySCENIC resources for human (hg38)
-WORKDIR /opt/pyscenic_resources
-
-## Feather db motif ranking files:
-RUN wget -q "https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/hg38_500bp_up_100bp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather"
-RUN wget -q "https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg38/refseq_r80/mc_v10_clust/gene_based/hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather"
-
-## MOTIF to TF annotations
-RUN wget -q "https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl"
-
-## All TFs
-RUN wget -q "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt"
-
-# Set environment variable for resource directory
 ENV PYSCENIC_RESOURCES="/opt/pyscenic_resources"
 
-# Reset working directory
-WORKDIR /
+WORKDIR /app
+ENTRYPOINT ["run-pyscenic"]
