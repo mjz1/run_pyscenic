@@ -2,10 +2,28 @@
 import logging
 import os
 import subprocess
+import tempfile
+import shutil
 
 import click
 import pandas as pd
 import scanpy as sc
+
+
+def _atomic_move(src_path, dst_path):
+    """Atomically move a file from src to dst using temporary file + rename.
+    
+    This ensures that the destination file is only updated when the source
+    is complete, preventing partial/empty files from being treated as valid.
+    
+    Args:
+        src_path: Source file path
+        dst_path: Destination file path
+    """
+    # Ensure the destination directory exists
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    # Atomic rename (on most filesystems, rename is atomic)
+    shutil.move(src_path, dst_path)
 
 
 def _ensure_files_exist(paths):
@@ -22,8 +40,11 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
     """Load AnnData, filter to genes in ranking databases, export cells x genes TSV; return path. Skip if present unless overwrite.
     
     Args:
-        ranking_files: Tuple of ranking database files to filter genes against.
-        resource_dir: Path to resource directory (for default ranking files if none provided).
+        anndata_path: Path to input .h5ad file
+        results_dir: Directory to write output files
+        max_cells: Maximum number of cells to process (None for all)
+        overwrite: Whether to overwrite existing files
+        ranking_files: Tuple/iterable of ranking database files to filter genes against
     """
     expr_path = os.path.join(results_dir, "expression.tsv")
     if os.path.exists(expr_path) and not overwrite:
@@ -114,9 +135,23 @@ def write_expression_tsv(anndata_path, results_dir, max_cells, overwrite, rankin
     df_cells_x_genes = pd.DataFrame(
         expr_dense, index=obs_names, columns=adata.var_names
     )
-    df_cells_x_genes.to_csv(expr_path, sep="\t", index=True)
-
-    logging.info("Wrote expression matrix to %s", expr_path)
+    
+    # Write to temporary file first, then atomically move to final location
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.tsv', dir=results_dir, delete=False
+    ) as tmp_file:
+        tmp_path = tmp_file.name
+    
+    try:
+        df_cells_x_genes.to_csv(tmp_path, sep="\t", index=True)
+        _atomic_move(tmp_path, expr_path)
+        logging.info("Wrote expression matrix to %s", expr_path)
+    except Exception as e:
+        # Clean up temporary file on error
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise e
+    
     return expr_path
 
 def run_grnboost2(
@@ -138,32 +173,46 @@ def run_grnboost2(
         )
         return adjacency_path
 
-    cmd = [
-        "pyscenic",
-        "grn",
-        "--num_workers",
-        str(n_cores),
-        "--seed",
-        str(seed),
-        "--method",
-        "grnboost2",
-        "--output",
-        adjacency_path,
-        expression_path,
-        tf_resolved,
-    ]
+    # Use temporary file for output to avoid empty files being treated as valid
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.tsv', dir=results_dir, delete=False
+    ) as tmp_file:
+        tmp_adjacency_path = tmp_file.name
+    
+    try:
+        cmd = [
+            "pyscenic",
+            "grn",
+            "--num_workers",
+            str(n_cores),
+            "--seed",
+            str(seed),
+            "--method",
+            "grnboost2",
+            "--output",
+            tmp_adjacency_path,
+            expression_path,
+            tf_resolved,
+        ]
 
-    logging.info("[GRN] Command: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error("pySCENIC grn failed. STDOUT: %s", result.stdout)
-        logging.error("pySCENIC grn failed. STDERR: %s", result.stderr)
-        raise subprocess.CalledProcessError(
-            result.returncode, cmd, output=result.stdout, stderr=result.stderr
-        )
+        logging.info("[GRN] Command: %s", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error("pySCENIC grn failed. STDOUT: %s", result.stdout)
+            logging.error("pySCENIC grn failed. STDERR: %s", result.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
 
-    logging.info("[GRN] Completed; adjacency at %s", adjacency_path)
-    return adjacency_path
+        # Atomically move temporary file to final location
+        _atomic_move(tmp_adjacency_path, adjacency_path)
+        logging.info("[GRN] Completed; adjacency at %s", adjacency_path)
+        return adjacency_path
+    except Exception as e:
+        # Clean up temporary file on error
+        if os.path.exists(tmp_adjacency_path):
+            os.remove(tmp_adjacency_path)
+        raise e
 
 def run_regdiff(
     results_dir,
@@ -171,6 +220,8 @@ def run_regdiff(
     n_cores,
     top_gene_percentile,
     overwrite,
+    tf_file=None,
+    resource_dir=None,
 ):
     """Run RegDiffusion GRN inference; skip if output exists unless overwrite.
     
@@ -180,6 +231,8 @@ def run_regdiff(
         n_cores: Number of cores/workers for edge extraction.
         top_gene_percentile: Percentile threshold for GRN edge weights (e.g., 50 for top 50%).
         overwrite: If True, regenerate adjacency even if it exists.
+        tf_file: Path to TF list file (optional, defaults to resource_dir/allTFs_hg38.txt).
+        resource_dir: Directory with pySCENIC resource files.
     
     Returns:
         Path to the generated adjacency.tsv file.
@@ -226,9 +279,22 @@ def run_regdiff(
     # Restrict to TFs and sort by importance
     adjacencies = adjacencies[adjacencies['TF'].isin(tf_df['TF'])].sort_values(by='importance', ascending=False)
     
-    adjacencies.to_csv(adjacency_path, sep='\t', index=False)
-    logging.info("[RegDiff] Completed; adjacency at %s", adjacency_path)
-    return adjacency_path
+    # Write to temporary file first, then atomically move to final location
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.tsv', dir=results_dir, delete=False
+    ) as tmp_file:
+        tmp_path = tmp_file.name
+    
+    try:
+        adjacencies.to_csv(tmp_path, sep='\t', index=False)
+        _atomic_move(tmp_path, adjacency_path)
+        logging.info("[RegDiff] Completed; adjacency at %s", adjacency_path)
+        return adjacency_path
+    except Exception as e:
+        # Clean up temporary file on error
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise e
 
 def run_ctx(
     results_dir,
@@ -253,38 +319,52 @@ def run_ctx(
         )
         return regulons_path
 
-    cmd = [
-        "pyscenic",
-        "ctx",
-        adjacency_path,
-    ]
-    cmd.extend(ranking_files)
-    cmd.extend(
-        [
-            "--annotations_fname",
-            motif_f,
-            "--expression_mtx_fname",
-            expression_path,
-            "--mode",
-            "custom_multiprocessing",
-            "--output",
-            regulons_path,
-            "--num_workers",
-            str(n_cores),
+    # Use temporary file for output to avoid empty files being treated as valid
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.csv', dir=results_dir, delete=False
+    ) as tmp_file:
+        tmp_regulons_path = tmp_file.name
+    
+    try:
+        cmd = [
+            "pyscenic",
+            "ctx",
+            adjacency_path,
         ]
-    )
-
-    logging.info("[CTX] Command: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error("pySCENIC ctx failed. STDOUT: %s", result.stdout)
-        logging.error("pySCENIC ctx failed. STDERR: %s", result.stderr)
-        raise subprocess.CalledProcessError(
-            result.returncode, cmd, output=result.stdout, stderr=result.stderr
+        cmd.extend(ranking_files)
+        cmd.extend(
+            [
+                "--annotations_fname",
+                motif_f,
+                "--expression_mtx_fname",
+                expression_path,
+                "--mode",
+                "custom_multiprocessing",
+                "--output",
+                tmp_regulons_path,
+                "--num_workers",
+                str(n_cores),
+            ]
         )
 
-    logging.info("[CTX] Completed; regulons at %s", regulons_path)
-    return regulons_path
+        logging.info("[CTX] Command: %s", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error("pySCENIC ctx failed. STDOUT: %s", result.stdout)
+            logging.error("pySCENIC ctx failed. STDERR: %s", result.stderr)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+
+        # Atomically move temporary file to final location
+        _atomic_move(tmp_regulons_path, regulons_path)
+        logging.info("[CTX] Completed; regulons at %s", regulons_path)
+        return regulons_path
+    except Exception as e:
+        # Clean up temporary file on error
+        if os.path.exists(tmp_regulons_path):
+            os.remove(tmp_regulons_path)
+        raise e
 
 
 @click.command()
@@ -486,7 +566,7 @@ def main(
                 ),
             )
         expression_path = write_expression_tsv(
-            anndata_path, results_dir, max_cells, overwrite, ranking_files_for_filter, resource_dir
+            anndata_path, results_dir, max_cells, overwrite, ranking_files_for_filter
         )
         
         if grn_method.lower() == "grnboost2":
@@ -509,6 +589,8 @@ def main(
                 n_cores,
                 regdiff_percentile,
                 overwrite,
+                tf_file,
+                resource_dir,
             )
             logging.info("[STEP] RegDiffusion complete")
         else:
@@ -516,7 +598,7 @@ def main(
     else:
         logging.info("[STEP] Skipping GRN step (--skip-grn enabled)")
         adjacency_path = os.path.join(results_dir, "adjacency.tsv")
-        expression_path = os.path.join(results_dir, "expression_t.tsv")
+        expression_path = os.path.join(results_dir, "expression.tsv")
         if not os.path.exists(adjacency_path):
             raise FileNotFoundError(
                 f"--skip-grn requires existing adjacency file at {adjacency_path}"
