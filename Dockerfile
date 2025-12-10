@@ -35,9 +35,6 @@ RUN mkdir -p /pyscenic/resources && \
 	wget -q "https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl" && \
 	wget -q "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt"
 
-# Install uv as root into a system location accessible to all users
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-
 # Copy the project into the image
 COPY . /pyscenic
 
@@ -46,9 +43,12 @@ RUN useradd -m -u 1000 -s /bin/bash pyscenic \
 	&& chown -R pyscenic:pyscenic /pyscenic
 USER pyscenic
 
+# Install uv as the pyscenic user
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/pyscenic/bin/" sh
+
 # Sync the project into a new environment, asserting the lockfile is up to date
 WORKDIR /pyscenic
-RUN /root/.local/bin/uv sync
+RUN /pyscenic/bin/uv --no-cache sync
 
 ENV VIRTUAL_ENV=/pyscenic/.venv
 ENV PATH="/pyscenic/.venv/bin:${PATH}"
