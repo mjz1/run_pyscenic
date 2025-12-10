@@ -54,7 +54,7 @@ run-pyscenic --help
 See available parameters:
 
 ```bash
-docker run zatzmanm/run_pyscenic:main run-pyscenic
+docker run zatzmanm/run_pyscenic:latest
 ```
 
 Recommended (preferred): mount input data and an output directory so outputs persist
@@ -64,8 +64,7 @@ docker run \
   --gpus all \
   -v /path/to/data:/data \
   -v /path/to/results:/results \
-  zatzmanm/run_pyscenic:main \
-  run-pyscenic \
+  zatzmanm/run_pyscenic:latest \
     --anndata-path /data/your_data.h5ad \
     --results-dir /results \
     --n-cores 16
@@ -76,9 +75,12 @@ docker run \
 ### Basic Usage with Singularity
 
 ```bash
-singularity run --nv \
+# Pull the image (if not already done)
+singularity pull docker://zatzmanm/run_pyscenic:latest
+# Run the container
+singularity run -e --nv \
   --bind /path/to/data:/data \
-  run-pyscenic \
+  run_pyscenic_latest.sif \
     --anndata-path /data/your_data.h5ad \
     --results-dir /data/results \
     --n-cores 16
@@ -91,8 +93,7 @@ singularity run --nv \
 RegDiffusion offers a significantly faster alternative to GRNBoost2 for GRN inference, providing substantial speedups (especially with GPU acceleration) and making it ideal for large-scale single-cell datasets. For more details, see the [RegDiffusion method](https://tuftsbcb.github.io/RegDiffusion/). Note, these results may differ from GRNBoost2.
 
 ```bash
-docker run -v /path/to/data:/data zatzmanm/run_pyscenic:main \
-  run_pyscenic.py \
+docker run -v /path/to/data:/data zatzmanm/run_pyscenic:latest \
     --anndata-path /data/your_data.h5ad \
     --results-dir /data/results \
     --grn-method regdiff
@@ -194,8 +195,7 @@ To use different ranking databases or TF lists:
 ```bash
 docker run -v /path/to/custom_resources:/custom_res \
   -v /path/to/data:/data \
-  zatzmanm/run_pyscenic:main \
-  run-pyscenic \
+  zatzmanm/run_pyscenic:latest \
     --anndata-path /data/data.h5ad \
     --resource-dir /custom_res \
     --ranking-files /custom_res/custom_rankings1.feather \
