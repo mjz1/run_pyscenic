@@ -481,7 +481,7 @@ def run_aucell(
 )
 @click.option(
     "--resource-dir",
-    default="/opt/pyscenic_resources",
+    default="/pyscenic/resources",
     show_default=True,
     type=click.Path(file_okay=False),
     help="Directory with pySCENIC resource files (TF lists, ranking databases, motif annotations)",
