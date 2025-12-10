@@ -3,11 +3,16 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 import click
 import pandas as pd
 import scanpy as sc
+
+# If no arguments provided, show help
+if len(sys.argv) == 1:
+    sys.argv.append("--help")
 
 
 def _atomic_move(src_path, dst_path):
@@ -581,7 +586,7 @@ def main(
     regdiff_percentile,
     skip_aucell,
 ):
-    """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx) from an AnnData input."""
+    """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx + AUCell) from an AnnData input."""
 
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
