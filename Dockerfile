@@ -24,8 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	libblas-dev \
 	gfortran \
 	pkg-config \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& curl -LsSf https://astral.sh/uv/install.sh | sh
+	&& rm -rf /var/lib/apt/lists/*
+	
 
 # Resources - download all in single RUN command (before switching to non-root user)
 RUN mkdir -p /pyscenic/resources && \
@@ -35,17 +35,20 @@ RUN mkdir -p /pyscenic/resources && \
 	wget -q "https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl" && \
 	wget -q "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt"
 
+# Install uv as root into a system location accessible to all users
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Copy the project into the image
 COPY . /pyscenic
-
-# Sync the project into a new environment, asserting the lockfile is up to date
-WORKDIR /pyscenic
-RUN uv sync
 
 # Use non-root user for HPC/Singularity compatibility
 RUN useradd -m -u 1000 -s /bin/bash pyscenic \
 	&& chown -R pyscenic:pyscenic /pyscenic
 USER pyscenic
+
+# Sync the project into a new environment, asserting the lockfile is up to date
+WORKDIR /pyscenic
+RUN /root/.cargo/bin/uv sync
 
 ENV VIRTUAL_ENV=/pyscenic/.venv
 ENV PATH="/pyscenic/.venv/bin:${PATH}"
