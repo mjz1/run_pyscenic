@@ -10,17 +10,15 @@ This project provides a complete, reproducible implementation of the pySCENIC wo
 - 🔄 **Dual GRN Methods**: Choose between [GRNBoost2](https://pyscenic.readthedocs.io/en/latest/tutorials.html) (via Singularity) or [RegDiffusion](https://tuftsbcb.github.io/RegDiffusion/)
 - ✅ **Data Quality Checks**: Automatic validation of integer counts and fallback to alternative count matrices
 - 🐳 **Fully Containerized**: Docker image with all dependencies and pre-downloaded resources
-- 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx)
+- 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx) → AUCell scoring (per-cell regulon activity)
 - ⚙️ **Flexible Configuration**: Customizable resources, parameters, and workflow steps
 
 ## Installation
 
-### Using Docker (Recommended)
-
-Pull the pre-built image from Docker Hub:
+### Using Docker
 
 ```bash
-docker pull zatzmanm/run_pyscenic:main
+docker run zatzmanm/run_pyscenic:main
 ```
 
 ### Using Singularity (HPC)
@@ -53,27 +51,44 @@ run-pyscenic --help
 
 ### Basic Usage with Docker
 
+See available parameters:
+
 ```bash
-docker run -v /path/to/data:/data zatzmanm/run_pyscenic:main \
-  run_pyscenic.py \
+docker run zatzmanm/run_pyscenic:main run-pyscenic
+```
+
+Recommended (preferred): mount input data and an output directory so outputs persist
+
+```bash
+docker run \
+  --gpus all \
+  -v /path/to/data:/data \
+  -v /path/to/results:/results \
+  zatzmanm/run_pyscenic:main \
+  run-pyscenic \
     --anndata-path /data/your_data.h5ad \
-    --results-dir /data/results \
+    --results-dir /results \
     --n-cores 16
 ```
+
+> Note the `--gpus all` flag is needed to enable GPU support for RegDiffusion in Docker (if available). Omit if not using RegDiffusion.
 
 ### Basic Usage with Singularity
 
 ```bash
-singularity run \
+singularity run --nv \
   --bind /path/to/data:/data \
-  run_pyscenic.sif \
-  run_pyscenic.py \
+  run-pyscenic \
     --anndata-path /data/your_data.h5ad \
     --results-dir /data/results \
     --n-cores 16
 ```
 
+> Note the `--nv` flag is needed to enable GPU support for RegDiffusion in Singularity (if available). Omit if not using RegDiffusion.
+
 ### Using RegDiffusion Instead of GRNBoost2
+
+RegDiffusion offers a significantly faster alternative to GRNBoost2 for GRN inference, providing substantial speedups (especially with GPU acceleration) and making it ideal for large-scale single-cell datasets. For more details, see the [RegDiffusion method](https://tuftsbcb.github.io/RegDiffusion/). Note, these results may differ from GRNBoost2.
 
 ```bash
 docker run -v /path/to/data:/data zatzmanm/run_pyscenic:main \
@@ -103,6 +118,7 @@ The pipeline generates:
 - `expression.tsv` - Filtered expression matrix (cells × genes)
 - `adjacency.tsv` - GRN adjacency matrix (TF-target interactions)
 - `regulons.csv` - Inferred regulons with motif evidence
+- `auc_mtx.csv` - Per-cell regulon activity scores (AUC matrix)
 
 ## Command-Line Options
 
@@ -130,6 +146,9 @@ Motif Enrichment (ctx):
 --motif-f FILE                   Custom motif annotations file
 --tf-file FILE                   Custom TF list file
 --overwrite                      Regenerate outputs even if they exist
+
+AUCell (activity scoring):
+--skip-aucell                    Skip AUCell scoring step (use existing auc_mtx.csv)
 ```
 
 ## Workflow Steps
@@ -176,7 +195,7 @@ To use different ranking databases or TF lists:
 docker run -v /path/to/custom_resources:/custom_res \
   -v /path/to/data:/data \
   zatzmanm/run_pyscenic:main \
-  run_pyscenic.py \
+  run-pyscenic \
     --anndata-path /data/data.h5ad \
     --resource-dir /custom_res \
     --ranking-files /custom_res/custom_rankings1.feather \
@@ -185,100 +204,6 @@ docker run -v /path/to/custom_resources:/custom_res \
     --motif-f /custom_res/custom_motifs.tbl
 ```
 
-### Performance Tuning
-
-- **`--n-cores`**: Set to number of available CPU cores for parallelization
-- **`--max-cells`**: Reduce dataset size for testing/quick runs
-- **`--regdiff-percentile`**: Lower values (e.g., 25) = more edges; higher values (e.g., 75) = fewer edges
-
-## Examples
-
-### Run Complete Pipeline on Sample Data
-
-```bash
-docker run -v ~/data:/data zatzmanm/run_pyscenic:main \
-  run_pyscenic.py \
-    --anndata-path /data/pbmc_5k.h5ad \
-    --results-dir /data/pyscenic_results \
-    --n-cores 32 \
-    --seed 123
-```
-
-### Process Only First 1000 Cells (Quick Test)
-
-```bash
-docker run -v ~/data:/data zatzmanm/run_pyscenic:main \
-  run_pyscenic.py \
-    --anndata-path /data/pbmc_5k.h5ad \
-    --results-dir /data/test_results \
-    --max-cells 1000 \
-    --n-cores 8
-```
-
-### Use RegDiffusion with Custom Motif Enrichment Only (Skip GRN)
-
-```bash
-docker run -v ~/data:/data zatzmanm/run_pyscenic:main \
-  run_pyscenic.py \
-    --anndata-path /data/pbmc_5k.h5ad \
-    --results-dir /data/results \
-    --skip-grn \  # Use existing adjacency.tsv
-    --ranking-files /data/my_rankings.feather \
-    --motif-f /data/my_motifs.tbl
-```
-
-### Run on HPC with Singularity
-
-```bash
-#!/bin/bash
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
-#SBATCH --time=08:00:00
-
-singularity run \
-  --bind /scratch:/scratch \
-  /path/to/run_pyscenic.sif \
-  run_pyscenic.py \
-    --anndata-path /scratch/data.h5ad \
-    --results-dir /scratch/results \
-    --n-cores $SLURM_CPUS_PER_TASK
-```
-
-## Troubleshooting
-
-### Data Quality Issues
-
-**Warning: "Main matrix does not contain integer counts"**
-- The input data appears to be normalized (log-transformed, scaled, etc.)
-- Solution: Check if `adata.layers["counts"]` exists; if yes, the script will use it automatically
-- Alternative: Preprocess your data to obtain raw counts
-
-**Error: "Missing required files"**
-- Ranking databases or motif files not found
-- Solution: Ensure resource files exist in the resource directory, or specify custom paths with `--ranking-files` and `--motif-f`
-
-### Performance Issues
-
-**Memory/CPU bottleneck?**
-- Reduce `--n-cores` if hitting memory limits
-- Use `--max-cells` to test on subset of data first
-- For large datasets, increase Docker memory: `-m 256g`
-
-**Singularity pull fails?**
-- Ensure Singularity version >= 3.0
-- Try specifying the tag explicitly: `singularity pull docker://zatzmanm/run_pyscenic:main`
-
-## Building Locally
-
-### Build Docker Image
-
-```bash
-git clone https://github.com/mjz1/run_pyscenic.git
-cd run_pyscenic
-docker build -t myrepo/run_pyscenic:latest .
-```
-
-The Dockerfile uses multi-stage builds and GitHub Actions for automated CI/CD.
 
 ## References
 
@@ -290,18 +215,7 @@ The Dockerfile uses multi-stage builds and GitHub Actions for automated CI/CD.
 
 If you use this wrapper, please cite:
 
-- **pySCENIC**: Aibar et al. (2017). SCENIC: single-cell regulatory network inference and clustering. *Nature Methods*, 14(11), 1083-1086.
-- **GRNBoost2**: Van de Sande et al. (2020). A robust gene regulatory network inference method...
-- **RegDiffusion**: [See RegDiffusion paper](https://tuftsbcb.github.io/RegDiffusion/)
-
-## License
-
-This wrapper is open-source. Check the LICENSE file for details.
-
-## Support
-
-For issues or questions:
-- Open a GitHub issue: https://github.com/mjz1/run_pyscenic/issues
-- Check existing issues for common problems
-- Include logs (use `--log-level DEBUG` for detailed output)
+- **pySCENIC**: Aibar S, González-Blas CB, Moerman T, Huynh-Thu VA, Imrichova H, Hulselmans G, Rambow F, Marine JC, Geurts P, Aerts J, van den Oord J, Atak ZK, Wouters J, Aerts S. SCENIC: single-cell regulatory network inference and clustering. Nat Methods. 2017 Nov;14(11):1083-1086. doi: 10.1038/nmeth.4463. Epub 2017 Oct 9. PMID: 28991892; PMCID: PMC5937676.
+- **GRNBoost2**: Moerman T, Aibar Santos S, Bravo González-Blas C, Simm J, Moreau Y, Aerts J, Aerts S. GRNBoost2 and Arboreto: efficient and scalable inference of gene regulatory networks. Bioinformatics. 2019 Jun 1;35(12):2159-2161. doi: 10.1093/bioinformatics/bty916. PMID: 30445495.
+- **RegDiffusion**: Zhu H, Slonim D. From Noise to Knowledge: Diffusion Probabilistic Model-Based Neural Inference of Gene Regulatory Networks. J Comput Biol. 2024 Nov;31(11):1087-1103. doi: 10.1089/cmb.2024.0607. Epub 2024 Oct 10. PMID: 39387266; PMCID: PMC11698671.
 
