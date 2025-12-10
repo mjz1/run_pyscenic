@@ -18,7 +18,7 @@ This project provides a complete, reproducible implementation of the pySCENIC wo
 ### Using Docker
 
 ```bash
-docker run zatzmanm/run_pyscenic:main
+docker run zatzmanm/run_pyscenic:latest
 ```
 
 ### Using Singularity (HPC)
@@ -26,7 +26,7 @@ docker run zatzmanm/run_pyscenic:main
 Convert the Docker image to Singularity format:
 
 ```bash
-singularity pull docker://zatzmanm/run_pyscenic:main
+singularity pull docker://zatzmanm/run_pyscenic:latest
 ```
 
 ### Local Installation (uv)
@@ -37,7 +37,9 @@ Recommended: use [uv](https://docs.astral.sh/uv/) for fast, reproducible install
 git clone https://github.com/mjz1/run_pyscenic.git
 cd run_pyscenic
 
+# Install UV if not already installed
 curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Ensure Python 3.10 is available (installs if missing)
 uv python install 3.10
 uv venv --python 3.10
@@ -107,11 +109,10 @@ Input must be an AnnData `.h5ad` file with:
 - **X matrix**: Raw integer count data (required) or normalized data with integer counts in `adata.layers["counts"]`
 - **var**: Gene annotations (must include `gene_names` or default index)
 - **obs**: Cell metadata (optional)
-
-**Data Quality Notes:**
-- The X matrix should contain **raw integer counts**, not normalized data
-- If X contains normalized/float data, the script checks for an integer counts layer at `adata.layers["counts"]` and uses that instead
 - Genes are automatically filtered to match the ranking databases used
+
+> ℹ️ **Note:** It is expected that your anndata object is already filtered for high-quality cells. Ensure this is done before running
+
 
 ### Output Files
 
@@ -179,6 +180,11 @@ The pipeline runs these steps in sequence:
 - Computes TF-motif associations
 - Links TF-target interactions to known motifs
 - Produces final regulon predictions with confidence scores
+
+### 4. AUCell (per-cell regulon activity)
+- Computes per-cell regulon activity (AUC) from the `regulons.csv` produced by the `ctx` step
+- Produces `auc_mtx.csv` (cells × regulons) containing activity scores usable for downstream visualization and clustering
+- Can be skipped with `--skip-aucell` when you only need regulons or already have `auc_mtx.csv`
 
 ## Configuration
 
