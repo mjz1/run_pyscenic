@@ -48,7 +48,7 @@ USER pyscenic
 
 # Sync the project into a new environment, asserting the lockfile is up to date
 WORKDIR /pyscenic
-RUN /root/.cargo/bin/uv sync
+RUN /root/.local/bin/uv sync
 
 ENV VIRTUAL_ENV=/pyscenic/.venv
 ENV PATH="/pyscenic/.venv/bin:${PATH}"
