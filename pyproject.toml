@@ -44,7 +44,7 @@ test = [
 run-pyscenic = "run_pyscenic:main"
 
 [tool.hatch.build.targets.wheel]
-include = ["run_pyscenic.py"]
+include = ["run_pyscenic.py", "binarize.py"]
 
 [dependency-groups]
 dev = [

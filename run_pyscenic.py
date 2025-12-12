@@ -10,6 +10,8 @@ import click
 import pandas as pd
 import scanpy as sc
 
+from binarize import binarize
+
 # If no arguments provided, show help
 if len(sys.argv) == 1:
     sys.argv.append("--help")
@@ -400,6 +402,73 @@ def run_ctx(
         raise e
 
 
+def run_binarize(
+    results_dir,
+    auc_mtx_path,
+    n_cores,
+    overwrite,
+):
+    """Binarize AUCell matrix using adaptive thresholds; skip if output exists unless overwrite.
+
+    Args:
+        results_dir: Directory to save output files.
+        auc_mtx_path: Path to AUC matrix CSV (from aucell step).
+        n_cores: Number of workers for binarization.
+        overwrite: If True, regenerate binarized matrix even if it exists.
+
+    Returns:
+        Tuple of (binarized_matrix_path, thresholds_path).
+    """
+    bin_mtx_path = os.path.join(results_dir, "auc_mtx_binarized.csv")
+    thresholds_path = os.path.join(results_dir, "auc_binarization_thresholds.csv")
+    
+    if os.path.exists(bin_mtx_path) and os.path.exists(thresholds_path) and not overwrite:
+        logging.info(
+            "Found existing binarized matrix at %s; skipping binarization (use --overwrite to rerun)",
+            bin_mtx_path,
+        )
+        return bin_mtx_path, thresholds_path
+
+    logging.info("[Binarize] Loading AUC matrix from %s", auc_mtx_path)
+    auc_mtx = pd.read_csv(auc_mtx_path, index_col=0)
+    
+    logging.info(
+        "[Binarize] Computing adaptive thresholds for %d regulons across %d cells",
+        auc_mtx.shape[1],
+        auc_mtx.shape[0],
+    )
+    bin_mtx, thresholds = binarize(auc_mtx, num_workers=n_cores)
+
+    # Use temporary files for output to avoid partial writes
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", dir=results_dir, delete=False
+    ) as tmp_bin:
+        tmp_bin_path = tmp_bin.name
+    
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", dir=results_dir, delete=False
+    ) as tmp_thresh:
+        tmp_thresh_path = tmp_thresh.name
+
+    try:
+        bin_mtx.to_csv(tmp_bin_path)
+        thresholds.to_csv(tmp_thresh_path)
+        
+        _atomic_move(tmp_bin_path, bin_mtx_path)
+        _atomic_move(tmp_thresh_path, thresholds_path)
+        
+        logging.info("[Binarize] Completed; binarized matrix at %s", bin_mtx_path)
+        logging.info("[Binarize] Thresholds saved to %s", thresholds_path)
+        return bin_mtx_path, thresholds_path
+    except Exception as e:
+        # Clean up temporary files on error
+        if os.path.exists(tmp_bin_path):
+            os.remove(tmp_bin_path)
+        if os.path.exists(tmp_thresh_path):
+            os.remove(tmp_thresh_path)
+        raise e
+
+
 def run_aucell(
     results_dir,
     expression_path,
@@ -568,6 +637,11 @@ def run_aucell(
     is_flag=True,
     help="Skip aucell (AUCell activity scoring) step",
 )
+@click.option(
+    "--skip-binarize",
+    is_flag=True,
+    help="Skip binarization of AUCell matrix",
+)
 def main(
     anndata_path,
     results_dir,
@@ -585,6 +659,7 @@ def main(
     grn_method,
     regdiff_percentile,
     skip_aucell,
+    skip_binarize,
 ):
     """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx + AUCell) from an AnnData input."""
 
@@ -762,7 +837,7 @@ def main(
                 f"aucell requires regulons file at {regulons_path}. "
                 "Either run without --skip-ctx or provide existing regulons."
             )
-        run_aucell(
+        auc_mtx_path = run_aucell(
             results_dir,
             expression_path,
             regulons_path,
@@ -772,6 +847,24 @@ def main(
         logging.info("[STEP] aucell complete")
     else:
         logging.info("[STEP] Skipping aucell step (--skip-aucell enabled)")
+        auc_mtx_path = os.path.join(results_dir, "auc_mtx.csv")
+
+    if not skip_binarize:
+        logging.info("[STEP] binarize (AUCell matrix binarization)")
+        if not os.path.exists(auc_mtx_path):
+            raise FileNotFoundError(
+                f"binarization requires AUC matrix file at {auc_mtx_path}. "
+                "Either run without --skip-aucell or provide existing auc_mtx.csv."
+            )
+        bin_mtx_path, thresholds_path = run_binarize(
+            results_dir,
+            auc_mtx_path,
+            n_cores,
+            overwrite,
+        )
+        logging.info("[STEP] binarization complete")
+    else:
+        logging.info("[STEP] Skipping binarization step (--skip-binarize enabled)")
 
 
 if __name__ == "__main__":
