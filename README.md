@@ -1,5 +1,8 @@
 # run_pyscenic
 
+[![Tests](https://github.com/mjz1/run_pyscenic/actions/workflows/test.yaml/badge.svg)](https://github.com/mjz1/run_pyscenic/actions/workflows/test.yaml)
+[![codecov](https://codecov.io/gh/mjz1/run_pyscenic/branch/main/graph/badge.svg)](https://codecov.io/gh/mjz1/run_pyscenic)
+
 A containerized Python wrapper for the [pySCENIC](https://pyscenic.readthedocs.io/) workflow, enabling scalable gene regulatory network (GRN) inference from single-cell RNA-seq data.
 
 ## Overview
