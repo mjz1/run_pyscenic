@@ -10,7 +10,7 @@ This project provides a complete, reproducible implementation of the pySCENIC wo
 - 🔄 **Dual GRN Methods**: Choose between [GRNBoost2](https://pyscenic.readthedocs.io/en/latest/tutorials.html) (via Singularity) or [RegDiffusion](https://tuftsbcb.github.io/RegDiffusion/)
 - ✅ **Data Quality Checks**: Automatic validation of integer counts and fallback to alternative count matrices
 - 🐳 **Fully Containerized**: Docker image with all dependencies and pre-downloaded resources
-- 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx) → AUCell scoring (per-cell regulon activity)
+- 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx) → AUCell scoring (per-cell regulon activity) → AUCell binarization for on/off regulon calls
 - ⚙️ **Flexible Configuration**: Customizable resources, parameters, and workflow steps
 
 ## Installation
@@ -121,6 +121,8 @@ The pipeline generates:
 - `adjacency.tsv` - GRN adjacency matrix (TF-target interactions)
 - `regulons.csv` - Inferred regulons with motif evidence
 - `auc_mtx.csv` - Per-cell regulon activity scores (AUC matrix)
+- `auc_mtx_binarized.csv` - Binarized per-cell regulon activity (0/1 calls)
+- `auc_binarization_thresholds.csv` - Adaptive thresholds used for binarization (per regulon)
 
 ## Command-Line Options
 
@@ -151,6 +153,9 @@ Motif Enrichment (ctx):
 
 AUCell (activity scoring):
 --skip-aucell                    Skip AUCell scoring step (use existing auc_mtx.csv)
+
+Binarization (AUCell on/off calls):
+--skip-binarize                  Skip binarization step (use existing auc_mtx_binarized.csv)
 ```
 
 ## Workflow Steps
@@ -185,6 +190,11 @@ The pipeline runs these steps in sequence:
 - Computes per-cell regulon activity (AUC) from the `regulons.csv` produced by the `ctx` step
 - Produces `auc_mtx.csv` (cells × regulons) containing activity scores usable for downstream visualization and clustering
 - Can be skipped with `--skip-aucell` when you only need regulons or already have `auc_mtx.csv`
+
+### 5. AUCell Binarization (per-cell regulon on/off)
+- Converts continuous AUCell scores into binary on/off calls per regulon using adaptive thresholds
+- Produces `auc_mtx_binarized.csv` plus `auc_binarization_thresholds.csv` (per-regulon thresholds used)
+- Can be skipped with `--skip-binarize` when you already have binarized outputs or prefer continuous scores
 
 ## Configuration
 
