@@ -74,3 +74,53 @@ def test_atomic_writes(synthetic_adata, adata_h5ad_file, mock_ranking_file, tmp_
     
     expr_df_2 = pd.read_csv(expr_path_2, sep='\t', index_col=0)
     assert expr_df_2.shape[0] > 0
+
+
+def test_aucell_thresholds_passed(tmp_results_dir, monkeypatch):
+    """Ensure aucell thresholds are passed through to pyscenic command."""
+    import run_pyscenic
+
+    expression_path = os.path.join(tmp_results_dir, "expression.tsv")
+    regulons_path = os.path.join(tmp_results_dir, "regulons.csv")
+    with open(expression_path, "w", encoding="utf-8") as expr_file:
+        expr_file.write("cell\tgene_1\ncell_1\t1\n")
+    with open(regulons_path, "w", encoding="utf-8") as reg_file:
+        reg_file.write("TF,gene_id,motif_id\nTF1,gene_1,M1\n")
+
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, text=True):
+        captured["cmd"] = cmd
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(run_pyscenic.subprocess, "run", fake_run)
+
+    rank_threshold = 1234
+    auc_threshold = 0.12
+    nes_threshold = 4.5
+
+    auc_mtx_path = run_pyscenic.run_aucell(
+        results_dir=tmp_results_dir,
+        expression_path=expression_path,
+        regulons_path=regulons_path,
+        n_cores=2,
+        rank_threshold=rank_threshold,
+        auc_threshold=auc_threshold,
+        nes_threshold=nes_threshold,
+        overwrite=True,
+    )
+
+    cmd = captured["cmd"]
+    assert "--rank_threshold" in cmd
+    assert cmd[cmd.index("--rank_threshold") + 1] == str(rank_threshold)
+    assert "--auc_threshold" in cmd
+    assert cmd[cmd.index("--auc_threshold") + 1] == str(auc_threshold)
+    assert "--nes_threshold" in cmd
+    assert cmd[cmd.index("--nes_threshold") + 1] == str(nes_threshold)
+    assert os.path.exists(auc_mtx_path)
