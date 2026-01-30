@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.1.2] - 2026-01-29
 ### Added
 - Expose AUCell threshold options (`--rank-threshold`, `--auc-threshold`, `--nes-threshold`) in the wrapper.
 
