@@ -474,6 +474,9 @@ def run_aucell(
     expression_path,
     regulons_path,
     n_cores,
+    rank_threshold,
+    auc_threshold,
+    nes_threshold,
     overwrite,
 ):
     """Run pySCENIC aucell (AUCell activity scoring); skip if output exists unless overwrite.
@@ -483,6 +486,9 @@ def run_aucell(
         expression_path: Path to expression matrix TSV (cells x genes).
         regulons_path: Path to regulons CSV (from ctx step).
         n_cores: Number of workers for AUCell computation.
+        rank_threshold: Rank threshold for motif enrichment (passed to aucell).
+        auc_threshold: AUC threshold for motif enrichment (passed to aucell).
+        nes_threshold: NES threshold for motif enrichment (passed to aucell).
         overwrite: If True, regenerate AUC matrix even if it exists.
 
     Returns:
@@ -512,6 +518,12 @@ def run_aucell(
             tmp_auc_mtx_path,
             "--num_workers",
             str(n_cores),
+            "--rank_threshold",
+            str(rank_threshold),
+            "--auc_threshold",
+            str(auc_threshold),
+            "--nes_threshold",
+            str(nes_threshold),
         ]
 
         logging.info("[AUCell] Command: %s", " ".join(cmd))
@@ -638,6 +650,27 @@ def run_aucell(
     help="Skip aucell (AUCell activity scoring) step",
 )
 @click.option(
+    "--rank-threshold",
+    default=5000,
+    show_default=True,
+    type=int,
+    help="AUCell: rank threshold for motif enrichment",
+)
+@click.option(
+    "--auc-threshold",
+    default=0.05,
+    show_default=True,
+    type=float,
+    help="AUCell: AUC threshold (fraction of ranked genes)",
+)
+@click.option(
+    "--nes-threshold",
+    default=3.0,
+    show_default=True,
+    type=float,
+    help="AUCell: NES threshold for enriched features",
+)
+@click.option(
     "--skip-binarize",
     is_flag=True,
     help="Skip binarization of AUCell matrix",
@@ -659,6 +692,9 @@ def main(
     grn_method,
     regdiff_percentile,
     skip_aucell,
+    rank_threshold,
+    auc_threshold,
+    nes_threshold,
     skip_binarize,
 ):
     """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx + AUCell) from an AnnData input."""
@@ -842,6 +878,9 @@ def main(
             expression_path,
             regulons_path,
             n_cores,
+            rank_threshold,
+            auc_threshold,
+            nes_threshold,
             overwrite,
         )
         logging.info("[STEP] aucell complete")
