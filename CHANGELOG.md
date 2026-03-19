@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-03-19
 ### Added
 - Configurable cell subsampling for GRN inference and motif enrichment steps
   while AUCell scoring runs on all cells (two-matrix flow).
