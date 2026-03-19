@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import logging
 import os
 import shutil
@@ -7,10 +8,12 @@ import sys
 import tempfile
 
 import click
+import numpy as np
 import pandas as pd
 import scanpy as sc
 
 from binarize import binarize
+from subsample import subsample
 
 # If no arguments provided, show help
 if len(sys.argv) == 1:
@@ -43,33 +46,191 @@ def _real(path):
     return os.path.realpath(path) if path else path
 
 
-def write_expression_tsv(
-    anndata_path, results_dir, max_cells, overwrite, ranking_files
+def _resolve_geosketch_embedding(
+    adata,
+    results_dir,
+    overwrite,
+    embedding_key=None,
+    batch_correction_method="none",
+    batch_key=None,
+    n_pca_components=50,
+    seed=42,
 ):
-    """Load AnnData, filter to genes in ranking databases, export cells x genes TSV; return path. Skip if present unless overwrite.
+    """Resolve the embedding matrix used by geosketch subsampling.
+
+    Precedence:
+      1. ``adata.obsm[embedding_key]`` if *embedding_key* is provided.
+      2. In-pipeline batch-corrected embedding (harmony / scanorama).
+      3. Naive PCA fallback.
+
+    The computed embedding is cached to ``{results_dir}/subsample_embedding.npy``
+    (respects *overwrite*).  adata.X is never modified.
+
+    Returns:
+        (embedding, embedding_meta) where *embedding* is an (n_cells, n_dims)
+        numpy array and *embedding_meta* is a dict of metadata fields.
+    """
+    cache_path = os.path.join(results_dir, "subsample_embedding.npy")
+    meta = {}
+
+    # ----- Case 1: pre-existing key in obsm -----
+    if embedding_key is not None:
+        if embedding_key not in adata.obsm:
+            raise ValueError(
+                f"--subsample-embedding-key '{embedding_key}' not found in "
+                f"adata.obsm. Available keys: {list(adata.obsm.keys())}"
+            )
+        emb = np.asarray(adata.obsm[embedding_key])
+        meta["embedding_source"] = "obsm"
+        meta["embedding_key"] = embedding_key
+        meta["embedding_dimensions"] = emb.shape[1]
+        if emb.shape[1] < 5:
+            logging.warning(
+                "Embedding '%s' has only %d dimensions (< 5); geosketch quality may suffer",
+                embedding_key,
+                emb.shape[1],
+            )
+        if emb.shape[1] > 100:
+            logging.warning(
+                "Embedding '%s' has %d dimensions (> 100); consider reducing dimensionality",
+                embedding_key,
+                emb.shape[1],
+            )
+        # Cache even user-supplied embeddings for reproducibility
+        _save_embedding(emb, cache_path, results_dir, overwrite)
+        return emb, meta
+
+    # ----- Case 2 / 3: compute embedding -----
+    if os.path.exists(cache_path) and not overwrite:
+        logging.info(
+            "Loading cached embedding from %s (use --overwrite to recompute)",
+            cache_path,
+        )
+        emb = np.load(cache_path)
+        meta["embedding_source"] = "cached"
+        meta["embedding_dimensions"] = emb.shape[1]
+        return emb, meta
+
+    # Work on a copy so adata.X (raw counts) is never touched
+    import scanpy as sc
+
+    adata_tmp = adata.copy()
+    sc.pp.normalize_total(adata_tmp)
+    sc.pp.log1p(adata_tmp)
+    sc.pp.pca(adata_tmp, n_comps=n_pca_components, random_state=seed)
+    meta["n_pca_components"] = n_pca_components
+
+    bc = batch_correction_method.lower()
+    if bc == "none":
+        emb = adata_tmp.obsm["X_pca"]
+        meta["embedding_source"] = "pca"
+        meta["batch_correction_method"] = "none"
+    elif bc == "harmony":
+        if batch_key is None or batch_key not in adata.obs.columns:
+            raise ValueError(
+                f"--subsample-batch-key '{batch_key}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        try:
+            import harmonypy
+        except ImportError:
+            raise ImportError(
+                "harmonypy is not installed. Install it with: pip install harmonypy"
+            )
+        logging.info(
+            "[Embedding] Running Harmony batch correction on batch_key='%s'",
+            batch_key,
+        )
+        ho = harmonypy.run_harmony(
+            adata_tmp.obsm["X_pca"],
+            adata_tmp.obs,
+            batch_key,
+            random_state=seed,
+        )
+        emb = ho.Z_corr.T  # harmony returns (n_dims, n_cells)
+        meta["embedding_source"] = "harmony"
+        meta["batch_correction_method"] = "harmony"
+        meta["batch_key"] = batch_key
+    elif bc == "scanorama":
+        if batch_key is None or batch_key not in adata.obs.columns:
+            raise ValueError(
+                f"--subsample-batch-key '{batch_key}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        try:
+            import scanorama
+        except ImportError:
+            raise ImportError(
+                "scanorama is not installed. Install it with: pip install scanorama"
+            )
+        logging.info(
+            "[Embedding] Running Scanorama batch correction on batch_key='%s'",
+            batch_key,
+        )
+        # scanorama.integrate_scanpy expects a list of AnnData per batch
+        batches = adata_tmp.obs[batch_key].unique()
+        adata_list = [adata_tmp[adata_tmp.obs[batch_key] == b].copy() for b in batches]
+        scanorama.integrate_scanpy(adata_list)
+        # Reassemble in original cell order
+        emb = np.zeros((adata_tmp.n_obs, adata_list[0].obsm["X_scanorama"].shape[1]))
+        for b, ad_b in zip(batches, adata_list):
+            mask = adata_tmp.obs[batch_key] == b
+            emb[mask.values] = ad_b.obsm["X_scanorama"]
+        meta["embedding_source"] = "scanorama"
+        meta["batch_correction_method"] = "scanorama"
+        meta["batch_key"] = batch_key
+    else:
+        raise ValueError(f"Unknown batch correction method: {batch_correction_method}")
+
+    meta["embedding_dimensions"] = emb.shape[1]
+    if emb.shape[1] < 5:
+        logging.warning(
+            "Computed embedding has only %d dimensions (< 5); geosketch quality may suffer",
+            emb.shape[1],
+        )
+    if emb.shape[1] > 100:
+        logging.warning(
+            "Computed embedding has %d dimensions (> 100); consider reducing dimensionality",
+            emb.shape[1],
+        )
+
+    _save_embedding(emb, cache_path, results_dir, overwrite)
+    return emb, meta
+
+
+def _save_embedding(emb, cache_path, results_dir, overwrite):
+    """Save embedding array to cache_path using atomic write."""
+    if os.path.exists(cache_path) and not overwrite:
+        return
+    with tempfile.NamedTemporaryFile(
+        suffix=".npy", dir=results_dir, delete=False
+    ) as tmp:
+        tmp_path = tmp.name
+    try:
+        np.save(tmp_path, emb)
+        _atomic_move(tmp_path, cache_path)
+        logging.info("Cached embedding to %s", cache_path)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise e
+
+
+def _load_and_filter_adata(anndata_path, ranking_files):
+    """Load AnnData, validate/swap to integer counts, filter genes to ranking DB intersection, remove zero genes.
 
     Args:
-        anndata_path: Path to input .h5ad file
-        results_dir: Directory to write output files
-        max_cells: Maximum number of cells to process (None for all)
-        overwrite: Whether to overwrite existing files
-        ranking_files: Tuple/iterable of ranking database files to filter genes against
-    """
-    expr_path = os.path.join(results_dir, "expression.tsv")
-    if os.path.exists(expr_path) and not overwrite:
-        logging.info(
-            "Found existing expression matrix at %s; skipping export (use --overwrite to regenerate)",
-            expr_path,
-        )
-        return expr_path
+        anndata_path: Path to input .h5ad file.
+        ranking_files: Tuple/iterable of ranking database feather files.
 
+    Returns:
+        Filtered AnnData object (all cells, filtered genes).
+    """
     logging.info("Reading AnnData from %s", anndata_path)
     adata = sc.read_h5ad(anndata_path)
     logging.info("Initial gene count: %d", adata.n_vars)
 
     # Check if the main matrix contains integer counts
-    import numpy as np
-
     test_data = adata.X[: min(100, adata.n_obs), : min(100, adata.n_vars)]
     if hasattr(test_data, "toarray"):
         test_data = test_data.toarray()
@@ -81,7 +242,6 @@ def write_expression_tsv(
             "Main matrix (adata.X) does not appear to contain integer counts. "
             "This may be normalized data, which is not suitable for GRN inference."
         )
-        # Check if counts layer exists
         if "counts" in adata.layers:
             logging.info(
                 "Found 'counts' layer in adata.layers - checking if it contains integers"
@@ -113,30 +273,21 @@ def write_expression_tsv(
     db_genes_list = []
     for ranking_file in ranking_files:
         df = pd.read_feather(ranking_file)
-        # Get all column names except the last one (which is typically a ranking/metadata column)
         db_genes = set(df.columns[:-1])
         db_genes_list.append(db_genes)
         logging.info(
             "Database %s has %d genes", os.path.basename(ranking_file), len(db_genes)
         )
 
-    # Find intersection of all database genes
     if db_genes_list:
         common_genes = set.intersection(*db_genes_list)
         logging.info("Common genes across all databases: %d", len(common_genes))
-
-        # Subset AnnData to genes present in all databases
         adata = adata[:, adata.var_names.isin(common_genes)]
         logging.info(
             "Filtered AnnData to genes in all databases: %d genes", adata.n_vars
         )
 
-    # Slice to max_cells before removing non-expressed genes
-    cell_slice = slice(None) if max_cells is None else slice(0, max_cells)
-    adata = adata[cell_slice, :]
-    logging.info("Sliced to %d cells", adata.n_obs)
-
-    # Remove non-expressed genes (genes with zero counts across the sliced cells)
+    # Remove non-expressed genes
     expr = adata.X
     if hasattr(expr, "toarray"):
         expr_array = expr.toarray()
@@ -150,15 +301,35 @@ def write_expression_tsv(
         "Removed non-expressed genes: %d -> %d genes", initial_n_vars, adata.n_vars
     )
 
+    return adata
+
+
+def _write_expression_tsv(adata, output_path, overwrite):
+    """Write an AnnData slice to a cells x genes TSV with atomic write.
+
+    Args:
+        adata: AnnData object (or slice) to export.
+        output_path: Destination TSV file path.
+        overwrite: Whether to overwrite an existing file.
+
+    Returns:
+        output_path.
+    """
+    if os.path.exists(output_path) and not overwrite:
+        logging.info(
+            "Found existing expression matrix at %s; skipping export (use --overwrite to regenerate)",
+            output_path,
+        )
+        return output_path
+
     expr = adata.X
     expr_dense = expr.toarray() if hasattr(expr, "toarray") else expr
 
-    obs_names = adata.obs_names
     df_cells_x_genes = pd.DataFrame(
-        expr_dense, index=obs_names, columns=adata.var_names
+        expr_dense, index=adata.obs_names, columns=adata.var_names
     )
 
-    # Write to temporary file first, then atomically move to final location
+    results_dir = os.path.dirname(output_path)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".tsv", dir=results_dir, delete=False
     ) as tmp_file:
@@ -166,15 +337,38 @@ def write_expression_tsv(
 
     try:
         df_cells_x_genes.to_csv(tmp_path, sep="\t", index=True)
-        _atomic_move(tmp_path, expr_path)
-        logging.info("Wrote expression matrix to %s", expr_path)
+        _atomic_move(tmp_path, output_path)
+        logging.info("Wrote expression matrix to %s", output_path)
     except Exception as e:
-        # Clean up temporary file on error
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise e
 
-    return expr_path
+    return output_path
+
+
+def write_expression_tsv(anndata_path, results_dir, overwrite, ranking_files):
+    """Load AnnData, filter to genes in ranking databases, export cells x genes TSV; return path. Skip if present unless overwrite.
+
+    This is kept for backward compatibility.  Internally delegates to
+    ``_load_and_filter_adata`` + ``_write_expression_tsv``.
+
+    Args:
+        anndata_path: Path to input .h5ad file
+        results_dir: Directory to write output files
+        overwrite: Whether to overwrite existing files
+        ranking_files: Tuple/iterable of ranking database files to filter genes against
+    """
+    expr_path = os.path.join(results_dir, "expression.tsv")
+    if os.path.exists(expr_path) and not overwrite:
+        logging.info(
+            "Found existing expression matrix at %s; skipping export (use --overwrite to regenerate)",
+            expr_path,
+        )
+        return expr_path
+
+    adata = _load_and_filter_adata(anndata_path, ranking_files)
+    return _write_expression_tsv(adata, expr_path, overwrite)
 
 
 def run_grnboost2(
@@ -421,8 +615,12 @@ def run_binarize(
     """
     bin_mtx_path = os.path.join(results_dir, "auc_mtx_binarized.csv")
     thresholds_path = os.path.join(results_dir, "auc_binarization_thresholds.csv")
-    
-    if os.path.exists(bin_mtx_path) and os.path.exists(thresholds_path) and not overwrite:
+
+    if (
+        os.path.exists(bin_mtx_path)
+        and os.path.exists(thresholds_path)
+        and not overwrite
+    ):
         logging.info(
             "Found existing binarized matrix at %s; skipping binarization (use --overwrite to rerun)",
             bin_mtx_path,
@@ -431,7 +629,7 @@ def run_binarize(
 
     logging.info("[Binarize] Loading AUC matrix from %s", auc_mtx_path)
     auc_mtx = pd.read_csv(auc_mtx_path, index_col=0)
-    
+
     logging.info(
         "[Binarize] Computing adaptive thresholds for %d regulons across %d cells",
         auc_mtx.shape[1],
@@ -444,7 +642,7 @@ def run_binarize(
         mode="w", suffix=".csv", dir=results_dir, delete=False
     ) as tmp_bin:
         tmp_bin_path = tmp_bin.name
-    
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".csv", dir=results_dir, delete=False
     ) as tmp_thresh:
@@ -453,10 +651,10 @@ def run_binarize(
     try:
         bin_mtx.to_csv(tmp_bin_path)
         thresholds.to_csv(tmp_thresh_path)
-        
+
         _atomic_move(tmp_bin_path, bin_mtx_path)
         _atomic_move(tmp_thresh_path, thresholds_path)
-        
+
         logging.info("[Binarize] Completed; binarized matrix at %s", bin_mtx_path)
         logging.info("[Binarize] Thresholds saved to %s", thresholds_path)
         return bin_mtx_path, thresholds_path
@@ -588,10 +786,58 @@ def run_aucell(
     help="Random seed passed to pySCENIC",
 )
 @click.option(
-    "--max-cells",
+    "--subsample-method",
+    default="none",
+    show_default=True,
+    type=click.Choice(
+        ["none", "random", "stratified", "geosketch"], case_sensitive=False
+    ),
+    help="Subsampling strategy for GRN/ctx steps (none = use all cells)",
+)
+@click.option(
+    "--subsample-n",
     default=None,
     type=int,
-    help="Export only the first N cells (optional; defaults to all cells)",
+    help="Target number of cells for subsampling (required if method != none)",
+)
+@click.option(
+    "--subsample-annotation",
+    default=None,
+    type=str,
+    help="adata.obs column for stratified sampling (required if method=stratified)",
+)
+@click.option(
+    "--subsample-min-per-group",
+    default=50,
+    show_default=True,
+    type=int,
+    help="Minimum cells per group for stratified sampling",
+)
+@click.option(
+    "--subsample-embedding-key",
+    default=None,
+    type=str,
+    help="adata.obsm key with pre-computed embedding for geosketch (overrides batch correction)",
+)
+@click.option(
+    "--subsample-batch-correction-method",
+    default="none",
+    show_default=True,
+    type=click.Choice(["none", "harmony", "scanorama"], case_sensitive=False),
+    help="Batch correction for geosketch embedding (ignored if --subsample-embedding-key is set)",
+)
+@click.option(
+    "--subsample-batch-key",
+    default=None,
+    type=str,
+    help="adata.obs column with batch labels (required if batch-correction-method != none)",
+)
+@click.option(
+    "--subsample-n-pca-components",
+    default=50,
+    show_default=True,
+    type=int,
+    help="PCA components before batch correction for geosketch embedding",
 )
 @click.option(
     "--log-level",
@@ -682,7 +928,14 @@ def main(
     tf_file,
     n_cores,
     seed,
-    max_cells,
+    subsample_method,
+    subsample_n,
+    subsample_annotation,
+    subsample_min_per_group,
+    subsample_embedding_key,
+    subsample_batch_correction_method,
+    subsample_batch_key,
+    subsample_n_pca_components,
     log_level,
     overwrite,
     motif_f,
@@ -720,12 +973,57 @@ def main(
     logging.info("[SETUP] results_dir=%s", results_dir)
     logging.info("[SETUP] resource_dir=%s", resource_dir)
     logging.info(
-        "[SETUP] cores=%s seed=%s max_cells=%s overwrite=%s",
+        "[SETUP] cores=%s seed=%s overwrite=%s",
         n_cores,
         seed,
-        max_cells,
         overwrite,
     )
+
+    # Validate subsampling options
+    subsampling_enabled = subsample_method.lower() != "none"
+    if subsampling_enabled:
+        if subsample_n is None:
+            raise click.BadParameter(
+                "--subsample-n is required when --subsample-method is not 'none'"
+            )
+        if subsample_method.lower() == "stratified" and subsample_annotation is None:
+            raise click.BadParameter(
+                "--subsample-annotation is required when --subsample-method is 'stratified'"
+            )
+        if subsample_n < 10000:
+            logging.warning(
+                "subsample_n=%d is below 10000; GRN inference quality may be impacted",
+                subsample_n,
+            )
+        # Validate geosketch-specific batch correction options
+        bc_method = subsample_batch_correction_method.lower()
+        if subsample_method.lower() == "geosketch":
+            if subsample_embedding_key and bc_method != "none":
+                logging.warning(
+                    "--subsample-embedding-key is set; ignoring "
+                    "--subsample-batch-correction-method=%s",
+                    subsample_batch_correction_method,
+                )
+            if bc_method != "none" and not subsample_embedding_key:
+                if subsample_batch_key is None:
+                    raise click.BadParameter(
+                        "--subsample-batch-key is required when "
+                        "--subsample-batch-correction-method is not 'none'"
+                    )
+        else:
+            # Not geosketch — warn if batch correction options are set
+            if bc_method != "none":
+                logging.warning(
+                    "--subsample-batch-correction-method is ignored when "
+                    "--subsample-method is not 'geosketch'"
+                )
+        logging.info(
+            "[SETUP] subsampling: method=%s n=%s annotation=%s seed=%s",
+            subsample_method,
+            subsample_n,
+            subsample_annotation,
+            seed,
+        )
 
     # Validate required files before running
     base_checks = [
@@ -780,9 +1078,167 @@ def main(
                     )
                 ),
             )
-        expression_path = write_expression_tsv(
-            anndata_path, results_dir, max_cells, overwrite, ranking_files_for_filter
-        )
+
+        if subsampling_enabled:
+            # Load and filter AnnData once, then write two matrices
+            adata = _load_and_filter_adata(anndata_path, ranking_files_for_filter)
+
+            # Check if subsampling is meaningful
+            if subsample_n >= adata.n_obs:
+                logging.warning(
+                    "subsample_n (%d) >= total cells after filtering (%d); "
+                    "skipping subsampling and using all cells",
+                    subsample_n,
+                    adata.n_obs,
+                )
+                subsampling_enabled = False
+                expression_path = _write_expression_tsv(
+                    adata,
+                    os.path.join(results_dir, "expression.tsv"),
+                    overwrite,
+                )
+                expression_full_path = expression_path
+            else:
+                # Resolve embedding for geosketch (if applicable)
+                embedding = None
+                embedding_meta = {}
+                if subsample_method.lower() == "geosketch":
+                    embedding, embedding_meta = _resolve_geosketch_embedding(
+                        adata,
+                        results_dir,
+                        overwrite,
+                        embedding_key=subsample_embedding_key,
+                        batch_correction_method=subsample_batch_correction_method,
+                        batch_key=subsample_batch_key,
+                        n_pca_components=subsample_n_pca_components,
+                        seed=seed,
+                    )
+
+                # Run subsampling
+                logging.info(
+                    "[Subsample] Running %s subsampling: %d -> %d cells",
+                    subsample_method,
+                    adata.n_obs,
+                    subsample_n,
+                )
+                indices = subsample(
+                    adata,
+                    method=subsample_method.lower(),
+                    n=subsample_n,
+                    seed=seed,
+                    annotation_column=subsample_annotation,
+                    min_per_group=subsample_min_per_group,
+                    embedding=embedding,
+                )
+                actual_n = len(indices)
+                logging.info(
+                    "[Subsample] Selected %d cells (target: %d)",
+                    actual_n,
+                    subsample_n,
+                )
+
+                # Build metadata
+                meta = {
+                    "method": subsample_method.lower(),
+                    "target_n": subsample_n,
+                    "actual_n": actual_n,
+                    "seed": seed,
+                    "total_cells_original": adata.n_obs,
+                    "total_genes": adata.n_vars,
+                }
+                # Include embedding metadata for geosketch
+                if embedding_meta:
+                    meta.update(embedding_meta)
+                if subsample_method.lower() == "stratified" and subsample_annotation:
+                    meta["annotation_column"] = subsample_annotation
+                    labels = adata.obs[subsample_annotation].values
+                    unique_labels, orig_counts = np.unique(labels, return_counts=True)
+                    meta["per_group_counts"] = {
+                        str(k): int(v) for k, v in zip(unique_labels, orig_counts)
+                    }
+                    sub_labels = labels[indices]
+                    sub_unique, sub_counts = np.unique(sub_labels, return_counts=True)
+                    meta["per_group_subsampled"] = {
+                        str(k): int(v) for k, v in zip(sub_unique, sub_counts)
+                    }
+                    # Log per-group counts
+                    for grp in unique_labels:
+                        orig_c = int(orig_counts[np.where(unique_labels == grp)[0][0]])
+                        sub_c = meta["per_group_subsampled"].get(str(grp), 0)
+                        logging.info(
+                            "[Subsample]   %s: %d -> %d cells", grp, orig_c, sub_c
+                        )
+                    # Warn about small groups
+                    for grp, cnt in meta["per_group_subsampled"].items():
+                        if cnt < subsample_min_per_group:
+                            logging.warning(
+                                "[Subsample] Group '%s' has %d cells after sampling "
+                                "(< min_per_group=%d)",
+                                grp,
+                                cnt,
+                                subsample_min_per_group,
+                            )
+
+                # Save metadata JSON
+                meta_path = os.path.join(results_dir, "subsample_metadata.json")
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", dir=results_dir, delete=False
+                ) as tmp_meta:
+                    tmp_meta_path = tmp_meta.name
+                try:
+                    json.dump(meta, open(tmp_meta_path, "w"), indent=2)
+                    _atomic_move(tmp_meta_path, meta_path)
+                    logging.info("[Subsample] Metadata saved to %s", meta_path)
+                except Exception as e:
+                    if os.path.exists(tmp_meta_path):
+                        os.remove(tmp_meta_path)
+                    raise e
+
+                # Save selected barcodes
+                barcodes_path = os.path.join(results_dir, "subsampled_barcodes.txt")
+                selected_barcodes = adata.obs_names[indices]
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", dir=results_dir, delete=False
+                ) as tmp_bc:
+                    tmp_bc_path = tmp_bc.name
+                try:
+                    with open(tmp_bc_path, "w") as f:
+                        f.write("\n".join(selected_barcodes) + "\n")
+                    _atomic_move(tmp_bc_path, barcodes_path)
+                    logging.info("[Subsample] Barcodes saved to %s", barcodes_path)
+                except Exception as e:
+                    if os.path.exists(tmp_bc_path):
+                        os.remove(tmp_bc_path)
+                    raise e
+
+                # Write subsampled expression matrix (for GRN + ctx)
+                expression_path = _write_expression_tsv(
+                    adata[indices, :],
+                    os.path.join(results_dir, "expression_subsampled.tsv"),
+                    overwrite,
+                )
+                # Write full expression matrix (for AUCell)
+                expression_full_path = _write_expression_tsv(
+                    adata,
+                    os.path.join(results_dir, "expression_full.tsv"),
+                    overwrite,
+                )
+                # Assert identical gene columns
+                sub_cols = pd.read_csv(
+                    expression_path, sep="\t", index_col=0, nrows=0
+                ).columns.tolist()
+                full_cols = pd.read_csv(
+                    expression_full_path, sep="\t", index_col=0, nrows=0
+                ).columns.tolist()
+                assert (
+                    sub_cols == full_cols
+                ), "Gene columns differ between subsampled and full matrices"
+        else:
+            # No subsampling — single expression.tsv
+            expression_path = write_expression_tsv(
+                anndata_path, results_dir, overwrite, ranking_files_for_filter
+            )
+            expression_full_path = expression_path
 
         if grn_method.lower() == "grnboost2":
             logging.info("[STEP] Running GRNBoost2")
@@ -813,7 +1269,13 @@ def main(
     else:
         logging.info("[STEP] Skipping GRN step (--skip-grn enabled)")
         adjacency_path = os.path.join(results_dir, "adjacency.tsv")
-        expression_path = os.path.join(results_dir, "expression.tsv")
+        # When skipping GRN with subsampling, expect the full matrix for aucell
+        if subsampling_enabled:
+            expression_path = os.path.join(results_dir, "expression_subsampled.tsv")
+            expression_full_path = os.path.join(results_dir, "expression_full.tsv")
+        else:
+            expression_path = os.path.join(results_dir, "expression.tsv")
+            expression_full_path = expression_path
         if not os.path.exists(adjacency_path):
             raise FileNotFoundError(
                 f"--skip-grn requires existing adjacency file at {adjacency_path}"
@@ -853,6 +1315,7 @@ def main(
             raise ValueError(
                 f"For ctx step, --n-cores ({n_cores}) must be >= number of ranking files ({num_ranking_files})"
             )
+        # ctx uses subsampled expression (or single expression.tsv if no subsampling)
         regulons_path = run_ctx(
             results_dir,
             resource_dir,
@@ -866,6 +1329,9 @@ def main(
     else:
         regulons_path = os.path.join(results_dir, "regulons.csv")
 
+    # AUCell uses the FULL expression matrix when subsampling is enabled
+    aucell_expression = expression_full_path if subsampling_enabled else expression_path
+
     if not skip_aucell:
         logging.info("[STEP] aucell (AUCell activity scoring)")
         if not os.path.exists(regulons_path):
@@ -875,7 +1341,7 @@ def main(
             )
         auc_mtx_path = run_aucell(
             results_dir,
-            expression_path,
+            aucell_expression,
             regulons_path,
             n_cores,
             rank_threshold,

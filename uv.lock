@@ -176,6 +176,15 @@ wheels = [
 ]
 
 [[package]]
+name = "annoy"
+version = "1.17.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/38/e321b0e05d8cc068a594279fb7c097efb1df66231c295d482d7ad51b6473/annoy-1.17.3.tar.gz", hash = "sha256:9cbfebefe0a5f843eba29c6be4c84d601f4f41ad4ded0486f1b88c3b07739c15", size = 647460, upload-time = "2023-06-14T16:37:34.152Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/c1/dafbf82add040db10e6663da2a719eea9b2ca7a3b4dc79dc42cc130b121b/annoy-1.17.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:c33a5d4d344c136c84976bfb2825760142a8bb25335165e24e11c9afbfa8c2e9", size = 57745, upload-time = "2023-06-14T16:37:32.469Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.12.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1161,6 +1170,12 @@ wheels = [
 ]
 
 [[package]]
+name = "fbpca"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/a5/2085d0645a4bb4f0b606251b0b7466c61326e4a471d445c1c3761a2d07bc/fbpca-1.0.tar.gz", hash = "sha256:150677642479663f317fdbb5e06dab3f98721cf7031bb4a84113d7a631c472d1", size = 11758, upload-time = "2014-12-09T21:25:39.221Z" }
+
+[[package]]
 name = "filelock"
 version = "3.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1395,6 +1410,20 @@ wheels = [
 ]
 
 [[package]]
+name = "geosketch"
+version = "1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fbpca" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/83/be440da764a468bdd2467ce0f74d1a20191be0f25e1ad6ab00e27594ff4e/geosketch-1.3.tar.gz", hash = "sha256:2b2a6056c2134048fa85972ee93b95bdf53555fdf482cc4bfc29c485b78bb5f4", size = 8731, upload-time = "2024-10-29T17:37:22.377Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/63/af/5159cc0d7de2260985a78bf973279647d6f58156e7ed2b74f66b5006a925/geosketch-1.3-py3-none-any.whl", hash = "sha256:b820d4d2fa727cc8f3a2cface7169f752a4a809e0930ca277fd987328b439c7e", size = 8148, upload-time = "2024-10-29T17:37:19.738Z" },
+]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1451,6 +1480,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d3/39/a7ef948ddf4d1c556b0b2b9559534777bccc318543b3f5a1efdf6b556c9c/h5py-3.15.1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:99d374a21f7321a4c6ab327c4ab23bd925ad69821aeb53a1e75dd809d19f67fa", size = 5025426, upload-time = "2025-10-16T10:35:19.831Z" },
     { url = "https://files.pythonhosted.org/packages/b6/d8/7368679b8df6925b8415f9dcc9ab1dab01ddc384d2b2c24aac9191bd9ceb/h5py-3.15.1-cp314-cp314-win_amd64.whl", hash = "sha256:9c73d1d7cdb97d5b17ae385153472ce118bed607e43be11e9a9deefaa54e0734", size = 2865704, upload-time = "2025-10-16T10:35:22.658Z" },
     { url = "https://files.pythonhosted.org/packages/d3/b7/4a806f85d62c20157e62e58e03b27513dc9c55499768530acc4f4c5ce4be/h5py-3.15.1-cp314-cp314-win_arm64.whl", hash = "sha256:a6d8c5a05a76aca9a494b4c53ce8a9c29023b7f64f625c6ce1841e92a362ccdf", size = 2465544, upload-time = "2025-10-16T10:35:25.695Z" },
+]
+
+[[package]]
+name = "harmonypy"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas", version = "2.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/73/74/976a4a6cc4933f578228ea330052c700a4057f7d04540ae05d461bee4aaa/harmonypy-0.2.0.tar.gz", hash = "sha256:9678a059f943723ba954f58d04e1a72e8a5c49ef4d95ba04fb33c9c1b5c67a77", size = 22488, upload-time = "2026-01-09T16:20:04.699Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/b2/e9a468d388b772e35f0918a20bd03812a5d83fb776c8b509e79209d87c05/harmonypy-0.2.0-py3-none-any.whl", hash = "sha256:663b679701f974fff03206f1188066e4fc0f38d432ea43cf0ee143f65c95cf8b", size = 23109, upload-time = "2026-01-09T16:20:05.687Z" },
 ]
 
 [[package]]
@@ -1516,6 +1562,18 @@ name = "interlap"
 version = "0.2.7"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/84/9f71369fc868dc963ddf51d1bfd8853a9793a37a21c9081a433f6e81d56a/interlap-0.2.7.tar.gz", hash = "sha256:31e4f30c54b067c4939049f5d8131ae5e2fa682ec71aa56f89c0e5b900806ec9", size = 6066, upload-time = "2020-10-02T17:54:06.464Z" }
+
+[[package]]
+name = "intervaltree"
+version = "3.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/53/c3/b2afa612aa0373f3e6bb190e6de35f293b307d1537f109e3e25dbfcdf212/intervaltree-3.2.1.tar.gz", hash = "sha256:f3f7e8baeb7dd75b9f7a6d33cf3ec10025984a8e66e3016d537e52130c73cfe2", size = 1231531, upload-time = "2025-12-24T04:25:06.773Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/83/7f/8a80a1c7c2ed05822b5a2b312d2995f30c533641f8198366ba2e26a7bb03/intervaltree-3.2.1-py2.py3-none-any.whl", hash = "sha256:a8a8381bbd35d48ceebee932c77ffc988492d22fb1d27d0ba1d74a7694eb8f0b", size = 25929, upload-time = "2025-12-24T04:25:05.298Z" },
+]
 
 [[package]]
 name = "ipykernel"
@@ -4077,7 +4135,7 @@ wheels = [
 
 [[package]]
 name = "run-pyscenic"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "anndata" },
@@ -4098,9 +4156,26 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "black" },
+    { name = "geosketch" },
+    { name = "harmonypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "scanorama" },
+]
+geosketch = [
+    { name = "geosketch" },
+]
+harmony = [
+    { name = "harmonypy" },
+]
+scanorama = [
+    { name = "scanorama" },
+]
+subsampling = [
+    { name = "geosketch" },
+    { name = "harmonypy" },
+    { name = "scanorama" },
 ]
 test = [
     { name = "pytest" },
@@ -4119,6 +4194,12 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "click", specifier = ">=8.0.0" },
     { name = "dask", specifier = ">=2023.0.0,<2024.0.0" },
+    { name = "geosketch", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "geosketch", marker = "extra == 'geosketch'", specifier = ">=1.0.0" },
+    { name = "geosketch", marker = "extra == 'subsampling'", specifier = ">=1.0.0" },
+    { name = "harmonypy", marker = "extra == 'dev'", specifier = ">=0.0.9" },
+    { name = "harmonypy", marker = "extra == 'harmony'", specifier = ">=0.0.9" },
+    { name = "harmonypy", marker = "extra == 'subsampling'", specifier = ">=0.0.9" },
     { name = "loompy", specifier = ">=3.0.0" },
     { name = "numpy", specifier = ">=1.21.0,<1.24.0" },
     { name = "pandas", specifier = ">=1.3.0" },
@@ -4129,17 +4210,39 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0.0" },
     { name = "regdiffusion", specifier = ">=0.1.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "scanorama", marker = "extra == 'dev'", specifier = ">=1.7.0" },
+    { name = "scanorama", marker = "extra == 'scanorama'", specifier = ">=1.7.0" },
+    { name = "scanorama", marker = "extra == 'subsampling'", specifier = ">=1.7.0" },
     { name = "scanpy", specifier = ">=1.9.0" },
     { name = "scikit-learn", specifier = ">=1.0.0" },
     { name = "scipy", specifier = ">=1.7.0" },
     { name = "setuptools", specifier = ">=45.0.0,<81.0.0" },
 ]
-provides-extras = ["dev", "test"]
+provides-extras = ["geosketch", "harmony", "scanorama", "subsampling", "dev", "test"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
+]
+
+[[package]]
+name = "scanorama"
+version = "1.7.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annoy" },
+    { name = "fbpca" },
+    { name = "geosketch" },
+    { name = "intervaltree" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/e1/9f96a38f2c036a3574540b57ea87f6106289c3999f9920610476baef6321/scanorama-1.7.4.tar.gz", hash = "sha256:67de100e63abc3028c7780d3a217e43e920a5781230bc6b6a51349d4605e005c", size = 36187, upload-time = "2023-10-07T21:08:13.708Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/ec/4077eb780a026f40816d4d64444ed01596a8ee166be53e7995cd0162dc28/scanorama-1.7.4-py3-none-any.whl", hash = "sha256:b20c87e725a2ba42c318aefadcfc6ed08cf52ff5ae00f1c041072f8888c7a225", size = 12508, upload-time = "2023-10-07T21:08:11.745Z" },
 ]
 
 [[package]]
