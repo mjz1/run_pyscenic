@@ -35,8 +35,8 @@ RUN mkdir -p /pyscenic/resources && \
 	wget -q "https://resources.aertslab.org/cistarget/motif2tf/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl" && \
 	wget -q "https://resources.aertslab.org/cistarget/tf_lists/allTFs_hg38.txt"
 
-# Copy the project into the image
-COPY . /pyscenic
+# Copy dependency manifests first for layer caching
+COPY --chown=pyscenic:pyscenic pyproject.toml uv.lock /pyscenic/
 
 # Use non-root user for HPC/Singularity compatibility
 RUN useradd -m -u 1000 -s /bin/bash pyscenic \
@@ -46,9 +46,13 @@ USER pyscenic
 # Install uv as the pyscenic user
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/pyscenic/bin/" sh
 
-# Sync the project into a new environment, asserting the lockfile is up to date
+# Install dependencies from lockfile (frozen = fail if lockfile is out of date)
 WORKDIR /pyscenic
-RUN /pyscenic/bin/uv --no-cache sync
+RUN /pyscenic/bin/uv --no-cache sync --frozen --extra subsampling --no-install-project
+
+# Copy the full project and install it
+COPY --chown=pyscenic:pyscenic . /pyscenic
+RUN /pyscenic/bin/uv --no-cache sync --frozen --extra subsampling
 
 ENV VIRTUAL_ENV=/pyscenic/.venv
 ENV PATH="/pyscenic/.venv/bin:${PATH}"
