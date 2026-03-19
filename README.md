@@ -11,6 +11,7 @@ This project provides a complete, reproducible implementation of the pySCENIC wo
 
 **Key Features:**
 - 🔄 **Dual GRN Methods**: Choose between [GRNBoost2](https://pyscenic.readthedocs.io/en/latest/tutorials.html) (via Singularity) or [RegDiffusion](https://tuftsbcb.github.io/RegDiffusion/)
+- 🧬 **Smart Subsampling**: Run GRN inference on a representative cell subset (random, stratified, or geometry-preserving via [geosketch](https://github.com/brianhie/geosketch)) while scoring all cells with AUCell — with optional Harmony / Scanorama batch correction
 - ✅ **Data Quality Checks**: Automatic validation of integer counts and fallback to alternative count matrices
 - 🐳 **Fully Containerized**: Docker image with all dependencies and pre-downloaded resources
 - 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx) → AUCell scoring (per-cell regulon activity) → AUCell binarization for on/off regulon calls
@@ -127,6 +128,13 @@ The pipeline generates:
 - `auc_mtx_binarized.csv` - Binarized per-cell regulon activity (0/1 calls)
 - `auc_binarization_thresholds.csv` - Adaptive thresholds used for binarization (per regulon)
 
+When [subsampling](#subsampling) is enabled, the single `expression.tsv` is replaced by two matrices and additional metadata:
+- `expression_subsampled.tsv` - Subsampled expression matrix used for GRN + ctx
+- `expression_full.tsv` - Full expression matrix used for AUCell scoring
+- `subsample_metadata.json` - Run parameters, cell counts, per-group breakdowns (stratified), and embedding metadata (geosketch)
+- `subsampled_barcodes.txt` - One selected cell barcode per line
+- `subsample_embedding.npy` - Cached embedding array (geosketch only)
+
 ## Command-Line Options
 
 ```
@@ -136,7 +144,6 @@ The pipeline generates:
                                  (default: /opt/pyscenic_resources)
 --n-cores N                      Number of CPU cores (default: 16)
 --seed SEED                      Random seed for reproducibility (default: 42)
---max-cells N                    Process only first N cells (optional)
 --log-level LEVEL                Logging verbosity: DEBUG|INFO|WARNING|ERROR|CRITICAL 
                                  (default: INFO)
 
@@ -154,6 +161,21 @@ Motif Enrichment (ctx):
 --tf-file FILE                   Custom TF list file
 --overwrite                      Regenerate outputs even if they exist
 
+Subsampling:
+--subsample-method METHOD         Subsampling strategy: none (default), random, stratified,
+                                  geosketch
+--subsample-n N                  Target cell count for subsampling (required if method != none)
+--subsample-annotation COL       adata.obs column for stratified sampling
+                                  (required if method = stratified)
+--subsample-min-per-group N      Minimum cells per group for stratified sampling (default: 50)
+--subsample-embedding-key KEY    adata.obsm key with pre-computed embedding for geosketch
+                                  (overrides batch correction)
+--subsample-batch-correction-method METHOD
+                                  Batch correction for geosketch embedding: none (default),
+                                  harmony, scanorama
+--subsample-batch-key COL        adata.obs batch column (required if batch-correction != none)
+--subsample-n-pca-components N   PCA components for geosketch embedding (default: 50)
+
 AUCell (activity scoring):
 --skip-aucell                    Skip AUCell scoring step (use existing auc_mtx.csv)
 
@@ -169,9 +191,11 @@ The pipeline runs these steps in sequence:
 - Loads AnnData file
 - Validates that count matrix contains integers (warns if normalized)
 - Filters to genes present in all ranking databases
-- Optionally limits to N cells
 - Removes non-expressed genes
-- Exports as TSV format
+- When subsampling is enabled, writes two matrices:
+  - `expression_subsampled.tsv` — subset of cells for GRN/ctx steps
+  - `expression_full.tsv` — all cells for AUCell scoring
+- Without subsampling, exports a single `expression.tsv`
 
 ### 2. GRN Inference
 **Option A: GRNBoost2** (default)
@@ -198,6 +222,279 @@ The pipeline runs these steps in sequence:
 - Converts continuous AUCell scores into binary on/off calls per regulon using adaptive thresholds
 - Produces `auc_mtx_binarized.csv` plus `auc_binarization_thresholds.csv` (per-regulon thresholds used)
 - Can be skipped with `--skip-binarize` when you already have binarized outputs or prefer continuous scores
+
+## Subsampling
+
+GRN inference (GRNBoost2/RegDiffusion) and motif enrichment (ctx) are the most
+computationally expensive pipeline steps and their runtime scales with cell
+count. For large datasets you can run these steps on a **representative
+subset** of cells while AUCell scoring — which is comparatively fast —
+still runs on **all** cells. This keeps regulon activity scores available for
+every cell in your dataset.
+
+Enable subsampling with `--subsample-method` and `--subsample-n`.
+
+### How It Works (Two-Matrix Flow)
+
+When subsampling is enabled the pipeline writes **two** expression matrices
+instead of the usual single `expression.tsv`:
+
+```
+expression_subsampled.tsv   ← subset (used by GRN + ctx)
+expression_full.tsv         ← all cells (used by AUCell)
+```
+
+1. The AnnData file is loaded and gene-filtered once.
+2. The chosen subsampling strategy selects cell indices.
+3. `expression_subsampled.tsv` (cells in the subset) feeds GRN inference and
+   motif enrichment.
+4. `expression_full.tsv` (all cells) feeds AUCell, so per-cell regulon
+   activities are computed genome-wide.
+5. Both matrices share the same gene columns, guaranteeing compatibility.
+
+If `--subsample-n` is greater than or equal to the number of cells after
+gene-filtering,  subsampling is skipped automatically and a single
+`expression.tsv` is written (with a warning).
+
+### Strategies
+
+#### `random`
+
+Uniform random sampling without replacement. Fast, simple, and reproducible
+(controlled by `--seed`). Best when you have no strong cell-type imbalance.
+
+#### `stratified`
+
+Preserves group proportions from an `adata.obs` annotation column (e.g.
+`cell_type`). The allocation algorithm:
+
+1. Computes each group's ideal share proportional to its fraction of the total.
+2. Guarantees a minimum of `--subsample-min-per-group` cells per group (default
+   50), or the entire group if it is smaller than the minimum.
+3. Redistributes leftover budget proportionally among larger groups.
+4. Adjusts for rounding so the total matches `--subsample-n` exactly.
+
+This avoids underrepresenting rare cell types. Per-group original and sampled
+counts are logged and recorded in `subsample_metadata.json`.
+
+#### `geosketch`
+
+[Geometric sketching](https://github.com/brianhie/geosketch) selects a subset
+that preserves the geometry of a low-dimensional embedding, so transcriptomic
+diversity is maximally retained even when cell types form overlapping clusters.
+Runs on an embedding matrix (cells × dimensions) — see
+[Batch-Aware Geosketch Embedding](#batch-aware-geosketch-embedding) for how the
+embedding is resolved.
+
+### Usage Examples
+
+**Random subsampling** — select 5 000 cells at random:
+
+```bash
+run-pyscenic \
+    --anndata-path data.h5ad \
+    --results-dir results/ \
+    --subsample-method random \
+    --subsample-n 5000
+```
+
+**Stratified subsampling** — 5 000 cells, preserving cell-type proportions
+with at least 100 cells per type:
+
+```bash
+run-pyscenic \
+    --anndata-path data.h5ad \
+    --results-dir results/ \
+    --subsample-method stratified \
+    --subsample-n 5000 \
+    --subsample-annotation cell_type \
+    --subsample-min-per-group 100
+```
+
+**Geosketch** — geometry-preserving subset with a default naive PCA embedding:
+
+```bash
+run-pyscenic \
+    --anndata-path data.h5ad \
+    --results-dir results/ \
+    --subsample-method geosketch \
+    --subsample-n 5000
+```
+
+**Geosketch with Harmony batch correction:**
+
+```bash
+run-pyscenic \
+    --anndata-path data.h5ad \
+    --results-dir results/ \
+    --subsample-method geosketch \
+    --subsample-n 5000 \
+    --subsample-batch-correction-method harmony \
+    --subsample-batch-key sample_id
+```
+
+**Geosketch with Scanorama batch correction:**
+
+```bash
+run-pyscenic \
+    --anndata-path data.h5ad \
+    --results-dir results/ \
+    --subsample-method geosketch \
+    --subsample-n 5000 \
+    --subsample-batch-correction-method scanorama \
+    --subsample-batch-key sample_id
+```
+
+**Geosketch with a pre-computed embedding stored in `adata.obsm`:**
+
+```bash
+run-pyscenic \
+    --anndata-path data.h5ad \
+    --results-dir results/ \
+    --subsample-method geosketch \
+    --subsample-n 5000 \
+    --subsample-embedding-key X_pca_harmony
+```
+
+### Batch-Aware Geosketch Embedding
+
+When using `geosketch`, the embedding used for geometric sketching is resolved
+with the following precedence:
+
+1. **Pre-computed embedding** — if `--subsample-embedding-key` is set, the
+   corresponding `adata.obsm` slot is used directly. This is the fastest
+   option if you already have a batch-corrected or curated embedding in your
+   AnnData object.
+2. **In-pipeline batch-corrected embedding** — if
+   `--subsample-batch-correction-method` is `harmony` or `scanorama`, the
+   pipeline normalises a copy of the count matrix, runs PCA
+   (`--subsample-n-pca-components`, default 50), then integrates across
+   batches identified by `--subsample-batch-key`. The original `adata.X`
+   (raw counts) is never modified.
+3. **Naive PCA** — fallback when neither of the above is specified. The same
+   normalise → log1p → PCA path runs, but without batch correction.
+
+The resolved embedding is cached to `subsample_embedding.npy` in the results
+directory. On subsequent runs the cache is reused automatically (pass
+`--overwrite` to recompute).
+
+> **Tip:** If `--subsample-embedding-key` is set and `--subsample-batch-correction-method` is also
+> specified, the pre-computed key takes priority and a warning is logged.
+
+### Subsampling Output Files
+
+When subsampling is active the following additional files are written to
+`--results-dir`:
+
+| File | Description |
+|---|---|
+| `expression_subsampled.tsv` | Cells × genes matrix for the selected subset (input to GRN + ctx). |
+| `expression_full.tsv` | Cells × genes matrix for all cells (input to AUCell). |
+| `subsample_metadata.json` | JSON with method, target/actual cell counts, seed, total cells/genes, per-group breakdowns (stratified), and embedding source/dimensions (geosketch). |
+| `subsampled_barcodes.txt` | One selected cell barcode per line, for external use or auditing. |
+| `subsample_embedding.npy` | Cached embedding array — geosketch only. |
+
+<details>
+<summary>Example <code>subsample_metadata.json</code> (stratified)</summary>
+
+```json
+{
+  "method": "stratified",
+  "target_n": 5000,
+  "actual_n": 5000,
+  "seed": 42,
+  "total_cells_original": 25000,
+  "total_genes": 1800,
+  "annotation_column": "cell_type",
+  "per_group_counts": {
+    "T_cell": 10000,
+    "B_cell": 8000,
+    "Monocyte": 5000,
+    "NK": 2000
+  },
+  "per_group_subsampled": {
+    "T_cell": 2000,
+    "B_cell": 1600,
+    "Monocyte": 1000,
+    "NK": 400
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>Example <code>subsample_metadata.json</code> (geosketch + harmony)</summary>
+
+```json
+{
+  "method": "geosketch",
+  "target_n": 5000,
+  "actual_n": 5000,
+  "seed": 42,
+  "total_cells_original": 25000,
+  "total_genes": 1800,
+  "n_pca_components": 50,
+  "embedding_source": "harmony",
+  "batch_correction_method": "harmony",
+  "batch_key": "sample_id",
+  "embedding_dimensions": 50
+}
+```
+
+</details>
+
+### Validation and Warnings
+
+The pipeline validates subsampling options before any computation:
+
+| Check | Behaviour |
+|---|---|
+| `--subsample-n` missing when method ≠ `none` | Error |
+| `--subsample-annotation` missing when method = `stratified` | Error |
+| `--subsample-batch-key` missing when batch correction ≠ `none` | Error |
+| `--subsample-batch-key` not in `adata.obs` | Error |
+| `--subsample-embedding-key` not in `adata.obsm` | Error |
+| `--subsample-n` < 10 000 | Warning (GRN quality may be impacted) |
+| `--subsample-n` ≥ total cells after filtering | Warning; subsampling skipped |
+| Batch correction options set with method ≠ `geosketch` | Warning (options ignored) |
+| `--subsample-embedding-key` set alongside batch correction | Warning (embedding key takes priority) |
+| Embedding has < 5 or > 100 dimensions | Warning |
+| A stratified group falls below `--subsample-min-per-group` after sampling | Warning (per group) |
+
+### Choosing a Strategy
+
+- **`random`** is the simplest option and works well when cell types are
+  roughly balanced.
+- **`stratified`** is recommended when your dataset has significant cell-type
+  imbalance and you want to ensure rare populations are represented in the GRN.
+- **`geosketch`** provides the best transcriptomic coverage because it selects
+  cells that span the full embedding space. Use this for heterogeneous datasets
+  or multi-sample experiments, especially with batch correction enabled.
+
+### Optional Dependencies
+
+The base install supports `random` and `stratified` strategies (they use numpy
+and scanpy, which are already required). Additional packages are needed only
+for specific features:
+
+| Package | Extra | Required for |
+|---|---|---|
+| `geosketch` | `pip install run-pyscenic[geosketch]` | `--subsample-method geosketch` |
+| `harmonypy` | `pip install run-pyscenic[harmony]` | `--subsample-batch-correction-method harmony` |
+| `scanorama` | `pip install run-pyscenic[scanorama]` | `--subsample-batch-correction-method scanorama` |
+
+Install all subsampling extras at once:
+
+```bash
+pip install run-pyscenic[subsampling]
+```
+
+Or with uv:
+
+```bash
+uv pip install -e ".[subsampling]"
+```
 
 ## Configuration
 

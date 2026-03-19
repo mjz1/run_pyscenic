@@ -28,11 +28,28 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+geosketch = [
+    "geosketch>=1.0.0",
+]
+harmony = [
+    "harmonypy>=0.0.9",
+]
+scanorama = [
+    "scanorama>=1.7.0",
+]
+subsampling = [
+    "geosketch>=1.0.0",
+    "harmonypy>=0.0.9",
+    "scanorama>=1.7.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
+    "geosketch>=1.0.0",
+    "harmonypy>=0.0.9",
+    "scanorama>=1.7.0",
 ]
 
 test = [
@@ -44,7 +61,7 @@ test = [
 run-pyscenic = "run_pyscenic:main"
 
 [tool.hatch.build.targets.wheel]
-include = ["run_pyscenic.py", "binarize.py"]
+include = ["run_pyscenic.py", "binarize.py", "subsample.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
