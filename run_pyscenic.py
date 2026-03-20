@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import json
 import logging
 import os
@@ -667,6 +668,163 @@ def run_binarize(
         raise e
 
 
+def flatten_regulons(regulons_path):
+    """Parse a pySCENIC regulons CSV into a flat DataFrame with one row per TF-motif-target.
+
+    All regulon-level metadata is preserved alongside each target gene, producing
+    a complete unfiltered table suitable for downstream filtering or gene-set analyses.
+
+    Args:
+        regulons_path: Path to the regulons CSV produced by ``pyscenic ctx``.
+
+    Returns:
+        pandas.DataFrame with columns: TF, MotifID, AUC, NES, MotifSimilarityQvalue,
+        OrthologousIdentity, Annotation, Context, RankAtMax, n_targets, target, weight.
+    """
+    df = pd.read_csv(regulons_path, header=[0, 1], index_col=[0, 1])
+
+    rows = []
+    for (tf, motif_id), row in df.iterrows():
+        target_genes = ast.literal_eval(row[("Enrichment", "TargetGenes")])
+        n_targets = len(target_genes)
+        base = {
+            "TF": tf,
+            "MotifID": motif_id,
+            "AUC": row[("Enrichment", "AUC")],
+            "NES": row[("Enrichment", "NES")],
+            "MotifSimilarityQvalue": row[("Enrichment", "MotifSimilarityQvalue")],
+            "OrthologousIdentity": row[("Enrichment", "OrthologousIdentity")],
+            "Annotation": row[("Enrichment", "Annotation")],
+            "Context": row[("Enrichment", "Context")],
+            "RankAtMax": row[("Enrichment", "RankAtMax")],
+            "n_targets": n_targets,
+        }
+        for gene, weight in target_genes:
+            rows.append({**base, "target": gene, "weight": weight})
+
+    return pd.DataFrame(rows)
+
+
+def filter_regulons(
+    flat_df,
+    min_nes=3.0,
+    require_activating=True,
+    require_direct_annotation=True,
+    min_targets=10,
+):
+    """Filter a flattened regulons table to high-confidence entries.
+
+    Designed to operate on the output of :func:`flatten_regulons`.  All
+    parameters have sensible defaults matching standard pySCENIC practice.
+
+    Args:
+        flat_df: DataFrame produced by ``flatten_regulons``.
+        min_nes: Minimum NES score (default 3.0).
+        require_activating: Keep only rows whose Context contains 'activating' (default True).
+        require_direct_annotation: Keep only directly annotated or orthologous-directly-annotated
+            TF-motif links (default True).
+        min_targets: Minimum number of targets per TF-motif pair (default 10).
+
+    Returns:
+        Filtered copy of the DataFrame.
+    """
+    df = flat_df.copy()
+
+    df = df[df["NES"] >= min_nes]
+
+    if require_activating:
+        df = df[df["Context"].str.contains("activating", na=False)]
+
+    if require_direct_annotation:
+        is_direct = df["Annotation"] == "gene is directly annotated"
+        is_ortho_direct = (
+            df["Annotation"].str.startswith("gene is orthologous to", na=False)
+            & df["Annotation"].str.endswith(
+                "which is directly annotated for motif", na=False
+            )
+        ) | df["Annotation"].str.contains(
+            r"which is directly annotated$", regex=True, na=False
+        )
+        df = df[is_direct | is_ortho_direct]
+
+    if min_targets > 0:
+        df = df[df["n_targets"] >= min_targets]
+
+    return df.reset_index(drop=True)
+
+
+def run_flatten_regulons(results_dir, regulons_path, overwrite):
+    """Flatten regulons CSV to per-target TSVs (unfiltered + filtered); skip if present unless overwrite.
+
+    Writes two files to *results_dir*:
+      - ``regulons_flat.tsv``  — complete unfiltered table
+      - ``regulons_flat_filtered.tsv`` — filtered with default quality thresholds
+
+    Args:
+        results_dir: Directory to write output files.
+        regulons_path: Path to the regulons CSV from ctx step.
+        overwrite: If True, regenerate even if outputs exist.
+
+    Returns:
+        Tuple of (unfiltered_path, filtered_path).
+    """
+    flat_path = os.path.join(results_dir, "regulons_flat.tsv")
+    filtered_path = os.path.join(results_dir, "regulons_flat_filtered.tsv")
+
+    if (
+        os.path.exists(flat_path)
+        and os.path.exists(filtered_path)
+        and not overwrite
+    ):
+        logging.info(
+            "Found existing flattened regulons at %s; skipping (use --overwrite to rerun)",
+            flat_path,
+        )
+        return flat_path, filtered_path
+
+    logging.info("[Flatten] Parsing regulons from %s", regulons_path)
+    flat_df = flatten_regulons(regulons_path)
+    logging.info(
+        "[Flatten] Unfiltered: %d rows (%d unique TFs)",
+        len(flat_df),
+        flat_df["TF"].nunique(),
+    )
+
+    filtered_df = filter_regulons(flat_df)
+    logging.info(
+        "[Flatten] Filtered: %d rows (%d unique TFs)",
+        len(filtered_df),
+        filtered_df["TF"].nunique(),
+    )
+
+    # Atomic writes
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".tsv", dir=results_dir, delete=False
+    ) as tmp_flat:
+        tmp_flat_path = tmp_flat.name
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".tsv", dir=results_dir, delete=False
+    ) as tmp_filt:
+        tmp_filt_path = tmp_filt.name
+
+    try:
+        flat_df.to_csv(tmp_flat_path, sep="\t", index=False)
+        filtered_df.to_csv(tmp_filt_path, sep="\t", index=False)
+
+        _atomic_move(tmp_flat_path, flat_path)
+        _atomic_move(tmp_filt_path, filtered_path)
+
+        logging.info("[Flatten] Unfiltered table: %s", flat_path)
+        logging.info("[Flatten] Filtered table: %s", filtered_path)
+        return flat_path, filtered_path
+    except Exception as e:
+        for p in (tmp_flat_path, tmp_filt_path):
+            if os.path.exists(p):
+                os.remove(p)
+        raise e
+
+
 def run_aucell(
     results_dir,
     expression_path,
@@ -921,6 +1079,11 @@ def run_aucell(
     is_flag=True,
     help="Skip binarization of AUCell matrix",
 )
+@click.option(
+    "--skip-flatten",
+    is_flag=True,
+    help="Skip flattening regulons to per-target TSV tables",
+)
 def main(
     anndata_path,
     results_dir,
@@ -949,6 +1112,7 @@ def main(
     auc_threshold,
     nes_threshold,
     skip_binarize,
+    skip_flatten,
 ):
     """Run pySCENIC workflow (GRNBoost2 or RegDiffusion + ctx + AUCell) from an AnnData input."""
 
@@ -1328,6 +1492,22 @@ def main(
         )
     else:
         regulons_path = os.path.join(results_dir, "regulons.csv")
+
+    if not skip_flatten:
+        logging.info("[STEP] flatten regulons to per-target tables")
+        if not os.path.exists(regulons_path):
+            raise FileNotFoundError(
+                f"flatten requires regulons file at {regulons_path}. "
+                "Either run without --skip-ctx or provide existing regulons.csv."
+            )
+        flat_path, filtered_path = run_flatten_regulons(
+            results_dir,
+            regulons_path,
+            overwrite,
+        )
+        logging.info("[STEP] flatten complete")
+    else:
+        logging.info("[STEP] Skipping flatten step (--skip-flatten enabled)")
 
     # AUCell uses the FULL expression matrix when subsampling is enabled
     aucell_expression = expression_full_path if subsampling_enabled else expression_path

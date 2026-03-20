@@ -14,7 +14,7 @@ This project provides a complete, reproducible implementation of the pySCENIC wo
 - 🧬 **Smart Subsampling**: Run GRN inference on a representative cell subset (random, stratified, or geometry-preserving via [geosketch](https://github.com/brianhie/geosketch)) while scoring all cells with AUCell — with optional Harmony / Scanorama batch correction
 - ✅ **Data Quality Checks**: Automatic validation of integer counts and fallback to alternative count matrices
 - 🐳 **Fully Containerized**: Docker image with all dependencies and pre-downloaded resources
-- 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx) → AUCell scoring (per-cell regulon activity) → AUCell binarization for on/off regulon calls
+- 📊 **Complete Pipeline**: Expression matrix export → GRN inference → motif enrichment (ctx) → regulon flattening & filtering → AUCell scoring (per-cell regulon activity) → AUCell binarization for on/off regulon calls
 - ⚙️ **Flexible Configuration**: Customizable resources, parameters, and workflow steps
 
 ## Installation
@@ -124,6 +124,8 @@ The pipeline generates:
 - `expression.tsv` - Filtered expression matrix (cells × genes)
 - `adjacency.tsv` - GRN adjacency matrix (TF-target interactions)
 - `regulons.csv` - Inferred regulons with motif evidence
+- `regulons_flat.tsv` - Flattened TF → target gene table (one row per TF-motif-target triple, unfiltered)
+- `regulons_flat_filtered.tsv` - Quality-filtered version of the flat table (NES ≥ 3, activating, direct annotation, ≥ 10 targets)
 - `auc_mtx.csv` - Per-cell regulon activity scores (AUC matrix)
 - `auc_mtx_binarized.csv` - Binarized per-cell regulon activity (0/1 calls)
 - `auc_binarization_thresholds.csv` - Adaptive thresholds used for binarization (per regulon)
@@ -176,6 +178,9 @@ Subsampling:
 --subsample-batch-key COL        adata.obs batch column (required if batch-correction != none)
 --subsample-n-pca-components N   PCA components for geosketch embedding (default: 50)
 
+Regulon Flattening:
+--skip-flatten                   Skip regulon flattening/filtering step
+
 AUCell (activity scoring):
 --skip-aucell                    Skip AUCell scoring step (use existing auc_mtx.csv)
 
@@ -213,12 +218,19 @@ The pipeline runs these steps in sequence:
 - Links TF-target interactions to known motifs
 - Produces final regulon predictions with confidence scores
 
-### 4. AUCell (per-cell regulon activity)
+### 4. Regulon Flattening & Filtering (`run_flatten_regulons`)
+- Parses the multi-header `regulons.csv` into a flat, analysis-ready table with one row per TF–motif–target triple
+- Columns: TF, MotifID, AUC, NES, MotifSimilarityQvalue, OrthologousIdentity, Annotation, Context, RankAtMax, n_targets, target, weight
+- Writes `regulons_flat.tsv` (unfiltered) and `regulons_flat_filtered.tsv` (filtered with defaults: NES ≥ 3.0, activating context, direct/orthologous-direct annotation, ≥ 10 targets per TF-motif pair)
+- Both `flatten_regulons()` and `filter_regulons()` are exposed as standalone functions for post-hoc re-filtering with custom parameters
+- Can be skipped with `--skip-flatten`
+
+### 5. AUCell (per-cell regulon activity)
 - Computes per-cell regulon activity (AUC) from the `regulons.csv` produced by the `ctx` step
 - Produces `auc_mtx.csv` (cells × regulons) containing activity scores usable for downstream visualization and clustering
 - Can be skipped with `--skip-aucell` when you only need regulons or already have `auc_mtx.csv`
 
-### 5. AUCell Binarization (per-cell regulon on/off)
+### 6. AUCell Binarization (per-cell regulon on/off)
 - Converts continuous AUCell scores into binary on/off calls per regulon using adaptive thresholds
 - Produces `auc_mtx_binarized.csv` plus `auc_binarization_thresholds.csv` (per-regulon thresholds used)
 - Can be skipped with `--skip-binarize` when you already have binarized outputs or prefer continuous scores

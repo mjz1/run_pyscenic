@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-20
+### Added
+- New regulon flattening and filtering step between ctx and AUCell.
+- `flatten_regulons()` parses multi-header `regulons.csv` into a flat
+  TF → target gene table with columns: TF, MotifID, AUC, NES,
+  MotifSimilarityQvalue, OrthologousIdentity, Annotation, Context,
+  RankAtMax, n_targets, target, weight.
+- `filter_regulons()` applies configurable quality filters (NES ≥ 3.0,
+  activating context, direct/orthologous-direct annotation, ≥ 10 targets)
+  and can be re-invoked by users with custom parameters.
+- Pipeline writes both `regulons_flat.tsv` (unfiltered) and
+  `regulons_flat_filtered.tsv` (default-filtered) to results directory.
+- `--skip-flatten` CLI option to bypass the flattening step.
+- 5 new tests covering unfiltered output, default and custom filtering,
+  file writing, and skip/overwrite logic.
+
 ## [0.2.0] - 2026-03-19
 ### Added
 - Configurable cell subsampling for GRN inference and motif enrichment steps
