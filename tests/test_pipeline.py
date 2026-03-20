@@ -198,21 +198,31 @@ def test_run_flatten_regulons_writes_files(mock_pyscenic_regulons_csv, tmp_resul
     """Test the full run_flatten_regulons pipeline step."""
     from run_pyscenic import run_flatten_regulons
 
-    flat_path, filtered_path = run_flatten_regulons(
+    flat_path, filtered_path, dedup_path, filtered_dedup_path = run_flatten_regulons(
         results_dir=tmp_results_dir,
         regulons_path=mock_pyscenic_regulons_csv,
         overwrite=False,
     )
 
-    assert os.path.exists(flat_path)
-    assert os.path.exists(filtered_path)
+    for p in (flat_path, filtered_path, dedup_path, filtered_dedup_path):
+        assert os.path.exists(p)
 
     flat_df = pd.read_csv(flat_path, sep="\t")
     filtered_df = pd.read_csv(filtered_path, sep="\t")
+    dedup_df = pd.read_csv(dedup_path, sep="\t")
+    filtered_dedup_df = pd.read_csv(filtered_dedup_path, sep="\t")
 
     assert len(flat_df) == 48
     assert len(filtered_df) < len(flat_df)
     assert set(filtered_df["TF"].unique()) == {"TF_A", "TF_F"}
+
+    # Dedup (unfiltered) should have unique TF-target pairs, all 6 TFs
+    assert dedup_df.duplicated(subset=["TF", "target"]).sum() == 0
+    assert dedup_df["TF"].nunique() == 6
+
+    # Dedup (filtered) should have unique TF-target pairs, only passing TFs
+    assert filtered_dedup_df.duplicated(subset=["TF", "target"]).sum() == 0
+    assert set(filtered_dedup_df["TF"].unique()) == {"TF_A", "TF_F"}
 
 
 def test_run_flatten_regulons_skip_existing(mock_pyscenic_regulons_csv, tmp_results_dir):
@@ -236,3 +246,34 @@ def test_run_flatten_regulons_skip_existing(mock_pyscenic_regulons_csv, tmp_resu
     # With overwrite — should regenerate
     run_flatten_regulons(tmp_results_dir, mock_pyscenic_regulons_csv, overwrite=True)
     assert os.path.getmtime(flat_path) > mtime_before
+
+
+def test_deduplicate_regulons(mock_pyscenic_regulons_csv):
+    """Test that deduplicate_regulons collapses to unique TF-target pairs."""
+    from run_pyscenic import flatten_regulons, filter_regulons, deduplicate_regulons
+
+    flat_df = flatten_regulons(mock_pyscenic_regulons_csv)
+
+    # Dedup on unfiltered
+    dedup_all = deduplicate_regulons(flat_df)
+    assert dedup_all.duplicated(subset=["TF", "target"]).sum() == 0
+    assert dedup_all["TF"].nunique() == flat_df["TF"].nunique()
+    # Same unique targets per TF
+    for tf in dedup_all["TF"].unique():
+        assert set(dedup_all.loc[dedup_all["TF"] == tf, "target"]) == set(
+            flat_df.loc[flat_df["TF"] == tf, "target"]
+        )
+
+    # Dedup on filtered
+    filtered_df = filter_regulons(flat_df)
+    dedup_filt = deduplicate_regulons(filtered_df)
+    assert dedup_filt.duplicated(subset=["TF", "target"]).sum() == 0
+    assert set(dedup_filt["TF"].unique()) == set(filtered_df["TF"].unique())
+
+    # Best NES kept in both cases
+    for dedup, source in ((dedup_all, flat_df), (dedup_filt, filtered_df)):
+        for _, row in dedup.iterrows():
+            match = source[
+                (source["TF"] == row["TF"]) & (source["target"] == row["target"])
+            ]
+            assert row["NES"] == match["NES"].max()

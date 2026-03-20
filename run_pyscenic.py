@@ -753,12 +753,36 @@ def filter_regulons(
     return df.reset_index(drop=True)
 
 
-def run_flatten_regulons(results_dir, regulons_path, overwrite):
-    """Flatten regulons CSV to per-target TSVs (unfiltered + filtered); skip if present unless overwrite.
+def deduplicate_regulons(df):
+    """Collapse a regulons table to one row per unique TF-target pair.
 
-    Writes two files to *results_dir*:
-      - ``regulons_flat.tsv``  — complete unfiltered table
+    When a TF-target pair appears under multiple motifs, the row with the
+    highest NES is retained.  This produces a clean gene-set table suitable
+    for downstream scoring (e.g. AUCell, ssGSEA, UCell).
+
+    Args:
+        df: DataFrame produced by :func:`flatten_regulons` or
+            :func:`filter_regulons`.
+
+    Returns:
+        Deduplicated DataFrame with the same columns, sorted by TF then target.
+    """
+    return (
+        df.sort_values("NES", ascending=False)
+        .drop_duplicates(subset=["TF", "target"])
+        .sort_values(["TF", "target"])
+        .reset_index(drop=True)
+    )
+
+
+def run_flatten_regulons(results_dir, regulons_path, overwrite):
+    """Flatten regulons CSV and write unfiltered, filtered, and deduplicated tables.
+
+    Writes four files to *results_dir*:
+      - ``regulons_flat.tsv``  — complete unfiltered table (one row per TF-motif-target)
       - ``regulons_flat_filtered.tsv`` — filtered with default quality thresholds
+      - ``regulons_flat_dedup.tsv`` — deduplicated unfiltered (one row per TF-target, best NES)
+      - ``regulons_flat_filtered_dedup.tsv`` — deduplicated filtered
 
     Args:
         results_dir: Directory to write output files.
@@ -766,21 +790,21 @@ def run_flatten_regulons(results_dir, regulons_path, overwrite):
         overwrite: If True, regenerate even if outputs exist.
 
     Returns:
-        Tuple of (unfiltered_path, filtered_path).
+        Tuple of (flat_path, filtered_path, dedup_path, filtered_dedup_path).
     """
     flat_path = os.path.join(results_dir, "regulons_flat.tsv")
     filtered_path = os.path.join(results_dir, "regulons_flat_filtered.tsv")
+    dedup_path = os.path.join(results_dir, "regulons_flat_dedup.tsv")
+    filtered_dedup_path = os.path.join(results_dir, "regulons_flat_filtered_dedup.tsv")
 
-    if (
-        os.path.exists(flat_path)
-        and os.path.exists(filtered_path)
-        and not overwrite
-    ):
+    all_paths = (flat_path, filtered_path, dedup_path, filtered_dedup_path)
+
+    if all(os.path.exists(p) for p in all_paths) and not overwrite:
         logging.info(
             "Found existing flattened regulons at %s; skipping (use --overwrite to rerun)",
             flat_path,
         )
-        return flat_path, filtered_path
+        return all_paths
 
     logging.info("[Flatten] Parsing regulons from %s", regulons_path)
     flat_df = flatten_regulons(regulons_path)
@@ -797,29 +821,45 @@ def run_flatten_regulons(results_dir, regulons_path, overwrite):
         filtered_df["TF"].nunique(),
     )
 
+    dedup_df = deduplicate_regulons(flat_df)
+    logging.info(
+        "[Flatten] Deduplicated (unfiltered): %d unique TF-target pairs (%d unique TFs)",
+        len(dedup_df),
+        dedup_df["TF"].nunique(),
+    )
+
+    filtered_dedup_df = deduplicate_regulons(filtered_df)
+    logging.info(
+        "[Flatten] Deduplicated (filtered): %d unique TF-target pairs (%d unique TFs)",
+        len(filtered_dedup_df),
+        filtered_dedup_df["TF"].nunique(),
+    )
+
     # Atomic writes
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".tsv", dir=results_dir, delete=False
-    ) as tmp_flat:
-        tmp_flat_path = tmp_flat.name
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".tsv", dir=results_dir, delete=False
-    ) as tmp_filt:
-        tmp_filt_path = tmp_filt.name
-
+    tmp_paths = []
     try:
-        flat_df.to_csv(tmp_flat_path, sep="\t", index=False)
-        filtered_df.to_csv(tmp_filt_path, sep="\t", index=False)
+        for df, dest in (
+            (flat_df, flat_path),
+            (filtered_df, filtered_path),
+            (dedup_df, dedup_path),
+            (filtered_dedup_df, filtered_dedup_path),
+        ):
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".tsv", dir=results_dir, delete=False
+            ) as tmp:
+                tmp_paths.append(tmp.name)
+            df.to_csv(tmp_paths[-1], sep="\t", index=False)
 
-        _atomic_move(tmp_flat_path, flat_path)
-        _atomic_move(tmp_filt_path, filtered_path)
+        for tmp_p, dest_p in zip(tmp_paths, all_paths):
+            _atomic_move(tmp_p, dest_p)
 
         logging.info("[Flatten] Unfiltered table: %s", flat_path)
         logging.info("[Flatten] Filtered table: %s", filtered_path)
-        return flat_path, filtered_path
+        logging.info("[Flatten] Deduplicated (unfiltered) table: %s", dedup_path)
+        logging.info("[Flatten] Deduplicated (filtered) table: %s", filtered_dedup_path)
+        return all_paths
     except Exception as e:
-        for p in (tmp_flat_path, tmp_filt_path):
+        for p in tmp_paths:
             if os.path.exists(p):
                 os.remove(p)
         raise e
@@ -1500,7 +1540,7 @@ def main(
                 f"flatten requires regulons file at {regulons_path}. "
                 "Either run without --skip-ctx or provide existing regulons.csv."
             )
-        flat_path, filtered_path = run_flatten_regulons(
+        flat_path, filtered_path, dedup_path, filtered_dedup_path = run_flatten_regulons(
             results_dir,
             regulons_path,
             overwrite,

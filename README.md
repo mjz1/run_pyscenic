@@ -126,6 +126,8 @@ The pipeline generates:
 - `regulons.csv` - Inferred regulons with motif evidence
 - `regulons_flat.tsv` - Flattened TF → target gene table (one row per TF-motif-target triple, unfiltered)
 - `regulons_flat_filtered.tsv` - Quality-filtered version of the flat table (NES ≥ 3, activating, direct annotation, ≥ 10 targets)
+- `regulons_flat_dedup.tsv` - Deduplicated unfiltered table (one row per unique TF-target pair, best-NES motif retained)
+- `regulons_flat_filtered_dedup.tsv` - Deduplicated filtered table (one row per unique TF-target pair, best-NES motif retained)
 - `auc_mtx.csv` - Per-cell regulon activity scores (AUC matrix)
 - `auc_mtx_binarized.csv` - Binarized per-cell regulon activity (0/1 calls)
 - `auc_binarization_thresholds.csv` - Adaptive thresholds used for binarization (per regulon)
@@ -221,8 +223,8 @@ The pipeline runs these steps in sequence:
 ### 4. Regulon Flattening & Filtering (`run_flatten_regulons`)
 - Parses the multi-header `regulons.csv` into a flat, analysis-ready table with one row per TF–motif–target triple
 - Columns: TF, MotifID, AUC, NES, MotifSimilarityQvalue, OrthologousIdentity, Annotation, Context, RankAtMax, n_targets, target, weight
-- Writes `regulons_flat.tsv` (unfiltered) and `regulons_flat_filtered.tsv` (filtered with defaults: NES ≥ 3.0, activating context, direct/orthologous-direct annotation, ≥ 10 targets per TF-motif pair)
-- Both `flatten_regulons()` and `filter_regulons()` are exposed as standalone functions for post-hoc re-filtering with custom parameters
+- Writes `regulons_flat.tsv` (unfiltered), `regulons_flat_filtered.tsv` (filtered with defaults: NES ≥ 3.0, activating context, direct/orthologous-direct annotation, ≥ 10 targets per TF-motif pair), `regulons_flat_dedup.tsv` (deduplicated unfiltered), and `regulons_flat_filtered_dedup.tsv` (deduplicated filtered) — dedup tables have one row per unique TF-target, keeping the best-NES motif
+- `flatten_regulons()`, `filter_regulons()`, and `deduplicate_regulons()` are exposed as standalone functions for post-hoc re-filtering with custom parameters
 - Can be skipped with `--skip-flatten`
 
 ### 5. AUCell (per-cell regulon activity)

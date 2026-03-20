@@ -14,11 +14,16 @@ All notable changes to this project will be documented in this file.
 - `filter_regulons()` applies configurable quality filters (NES ≥ 3.0,
   activating context, direct/orthologous-direct annotation, ≥ 10 targets)
   and can be re-invoked by users with custom parameters.
-- Pipeline writes both `regulons_flat.tsv` (unfiltered) and
-  `regulons_flat_filtered.tsv` (default-filtered) to results directory.
+- `deduplicate_regulons()` collapses any flat table to one row per unique
+  TF-target pair (keeping the best-NES motif) for clean gene-set scoring.
+- Pipeline writes `regulons_flat.tsv` (unfiltered),
+  `regulons_flat_filtered.tsv` (default-filtered),
+  `regulons_flat_dedup.tsv` (deduplicated unfiltered), and
+  `regulons_flat_filtered_dedup.tsv` (deduplicated filtered) to results
+  directory.
 - `--skip-flatten` CLI option to bypass the flattening step.
-- 5 new tests covering unfiltered output, default and custom filtering,
-  file writing, and skip/overwrite logic.
+- 6 new tests covering unfiltered output, default and custom filtering,
+  deduplication, file writing, and skip/overwrite logic.
 
 ## [0.2.0] - 2026-03-19
 ### Added
