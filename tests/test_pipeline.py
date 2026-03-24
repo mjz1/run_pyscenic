@@ -124,3 +124,156 @@ def test_aucell_thresholds_passed(tmp_results_dir, monkeypatch):
     assert "--nes_threshold" in cmd
     assert cmd[cmd.index("--nes_threshold") + 1] == str(nes_threshold)
     assert os.path.exists(auc_mtx_path)
+
+
+def test_flatten_regulons_unfiltered(mock_pyscenic_regulons_csv):
+    """Test that flatten_regulons produces all rows with correct columns."""
+    from run_pyscenic import flatten_regulons
+
+    df = flatten_regulons(mock_pyscenic_regulons_csv)
+
+    expected_cols = {
+        "TF", "MotifID", "AUC", "NES", "MotifSimilarityQvalue",
+        "OrthologousIdentity", "Annotation", "Context", "RankAtMax",
+        "n_targets", "target", "weight",
+    }
+    assert set(df.columns) == expected_cols
+
+    # No NaN in key columns
+    assert df["TF"].notna().all()
+    assert df["target"].notna().all()
+    assert df["weight"].notna().all()
+
+    # Total rows should equal sum of all target lists:
+    # Row0=11, Row1=11, Row2=2, Row3=11, Row4=3, Row5=10 => 48
+    assert len(df) == 48
+
+    # n_targets should match per-group count
+    for (tf, motif), group in df.groupby(["TF", "MotifID"]):
+        assert group["n_targets"].iloc[0] == len(group)
+
+    # Check all 6 TFs present
+    assert df["TF"].nunique() == 6
+
+
+def test_filter_regulons_defaults(mock_pyscenic_regulons_csv):
+    """Test that filter_regulons with defaults keeps only high-quality entries."""
+    from run_pyscenic import flatten_regulons, filter_regulons
+
+    flat_df = flatten_regulons(mock_pyscenic_regulons_csv)
+    filtered = filter_regulons(flat_df)
+
+    # Should keep TF_A (passes all) and TF_F (orthologous + direct)
+    # TF_B: NES 2.5 < 3.0 => removed
+    # TF_C: repressing context => removed
+    # TF_D: inferred annotation => removed
+    # TF_E: only 3 targets < 10 => removed
+    assert set(filtered["TF"].unique()) == {"TF_A", "TF_F"}
+    assert len(filtered) == 11 + 10  # 11 targets for TF_A, 10 for TF_F
+
+
+def test_filter_regulons_custom_params(mock_pyscenic_regulons_csv):
+    """Test filter_regulons with relaxed parameters."""
+    from run_pyscenic import flatten_regulons, filter_regulons
+
+    flat_df = flatten_regulons(mock_pyscenic_regulons_csv)
+
+    # Relax all filters
+    filtered = filter_regulons(
+        flat_df,
+        min_nes=0.0,
+        require_activating=False,
+        require_direct_annotation=False,
+        min_targets=0,
+    )
+    # With no filters, should return everything
+    assert len(filtered) == len(flat_df)
+
+    # Only relax NES
+    filtered_nes = filter_regulons(flat_df, min_nes=2.0)
+    assert "TF_B" in filtered_nes["TF"].values
+
+
+def test_run_flatten_regulons_writes_files(mock_pyscenic_regulons_csv, tmp_results_dir):
+    """Test the full run_flatten_regulons pipeline step."""
+    from run_pyscenic import run_flatten_regulons
+
+    flat_path, filtered_path, dedup_path, filtered_dedup_path = run_flatten_regulons(
+        results_dir=tmp_results_dir,
+        regulons_path=mock_pyscenic_regulons_csv,
+        overwrite=False,
+    )
+
+    for p in (flat_path, filtered_path, dedup_path, filtered_dedup_path):
+        assert os.path.exists(p)
+
+    flat_df = pd.read_csv(flat_path, sep="\t")
+    filtered_df = pd.read_csv(filtered_path, sep="\t")
+    dedup_df = pd.read_csv(dedup_path, sep="\t")
+    filtered_dedup_df = pd.read_csv(filtered_dedup_path, sep="\t")
+
+    assert len(flat_df) == 48
+    assert len(filtered_df) < len(flat_df)
+    assert set(filtered_df["TF"].unique()) == {"TF_A", "TF_F"}
+
+    # Dedup (unfiltered) should have unique TF-target pairs, all 6 TFs
+    assert dedup_df.duplicated(subset=["TF", "target"]).sum() == 0
+    assert dedup_df["TF"].nunique() == 6
+
+    # Dedup (filtered) should have unique TF-target pairs, only passing TFs
+    assert filtered_dedup_df.duplicated(subset=["TF", "target"]).sum() == 0
+    assert set(filtered_dedup_df["TF"].unique()) == {"TF_A", "TF_F"}
+
+
+def test_run_flatten_regulons_skip_existing(mock_pyscenic_regulons_csv, tmp_results_dir):
+    """Test that run_flatten_regulons skips when outputs exist and overwrite=False."""
+    from run_pyscenic import run_flatten_regulons
+
+    # First run
+    run_flatten_regulons(tmp_results_dir, mock_pyscenic_regulons_csv, overwrite=False)
+
+    # Modify the flat file to detect if it gets overwritten
+    flat_path = os.path.join(tmp_results_dir, "regulons_flat.tsv")
+    mtime_before = os.path.getmtime(flat_path)
+
+    import time
+    time.sleep(0.05)
+
+    # Second run — should skip
+    run_flatten_regulons(tmp_results_dir, mock_pyscenic_regulons_csv, overwrite=False)
+    assert os.path.getmtime(flat_path) == mtime_before
+
+    # With overwrite — should regenerate
+    run_flatten_regulons(tmp_results_dir, mock_pyscenic_regulons_csv, overwrite=True)
+    assert os.path.getmtime(flat_path) > mtime_before
+
+
+def test_deduplicate_regulons(mock_pyscenic_regulons_csv):
+    """Test that deduplicate_regulons collapses to unique TF-target pairs."""
+    from run_pyscenic import flatten_regulons, filter_regulons, deduplicate_regulons
+
+    flat_df = flatten_regulons(mock_pyscenic_regulons_csv)
+
+    # Dedup on unfiltered
+    dedup_all = deduplicate_regulons(flat_df)
+    assert dedup_all.duplicated(subset=["TF", "target"]).sum() == 0
+    assert dedup_all["TF"].nunique() == flat_df["TF"].nunique()
+    # Same unique targets per TF
+    for tf in dedup_all["TF"].unique():
+        assert set(dedup_all.loc[dedup_all["TF"] == tf, "target"]) == set(
+            flat_df.loc[flat_df["TF"] == tf, "target"]
+        )
+
+    # Dedup on filtered
+    filtered_df = filter_regulons(flat_df)
+    dedup_filt = deduplicate_regulons(filtered_df)
+    assert dedup_filt.duplicated(subset=["TF", "target"]).sum() == 0
+    assert set(dedup_filt["TF"].unique()) == set(filtered_df["TF"].unique())
+
+    # Best NES kept in both cases
+    for dedup, source in ((dedup_all, flat_df), (dedup_filt, filtered_df)):
+        for _, row in dedup.iterrows():
+            match = source[
+                (source["TF"] == row["TF"]) & (source["target"] == row["target"])
+            ]
+            assert row["NES"] == match["NES"].max()
